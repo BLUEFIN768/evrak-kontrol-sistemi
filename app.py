@@ -14,7 +14,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 try:
     import pytesseract
     from pdf2image import convert_from_bytes
-    from PIL import Image, ImageEnhance
+    from PIL import Image
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
@@ -52,7 +52,7 @@ if st.sidebar.button("🚪 Çıkış Yap"):
     st.rerun()
 
 st.title("⚓ Evrak Kontrol & Denetim Portalı")
-st.caption("Nihai Sürüm: Otomatik Belge ve Numara Çıkarımı")
+st.caption("Nihai Sürüm: Otomatik Belge ve Numara Çıkarımı (Renkli Tarama)")
 
 RANKS_MAP = {
     "Master": 6, "Chief officer": 7, "2 nd Officer": 8, "3 rd Officer": 9,
@@ -93,7 +93,7 @@ join_date = st.sidebar.date_input("Katılış Tarihi", datetime.date.today())
 
 def clean_sb(raw_val):
     val = re.sub(r'[^a-zA-Z0-9]', '', raw_val).upper()
-    val = val.replace('5', 'S', 1).replace('8', 'S', 1)
+    val = val.replace('5', 'S', 1).replace('8', 'S', 1).replace('$', 'S', 1)
     if val.startswith('S') and not val.startswith('S00'):
         val = val.replace('S', 'S00', 1)
     return val
@@ -125,38 +125,42 @@ def extract_data(files):
                 for page in reader.pages: text += (page.extract_text() or "") + " "
             except: pass
             
-        # 3. Görsel / OCR Okuma (Eğer metin boşsa)
+        # 3. Görsel / OCR Okuma (Kırmızı mürekkebi silmemek için filtreler kaldırıldı)
         if len(text.strip()) < 50 and OCR_AVAILABLE:
             try:
                 if fname.endswith(".pdf"):
                     images = convert_from_bytes(content, first_page=1, last_page=1, dpi=300)
                     if images: 
-                        img = ImageEnhance.Contrast(images[0].convert('L')).enhance(2.0)
-                        text += pytesseract.image_to_string(img, lang="eng+tur")
+                        text += pytesseract.image_to_string(images[0], lang="eng")
                 elif fname.endswith((".jpg", ".jpeg", ".png")):
-                    img = ImageEnhance.Contrast(Image.open(io.BytesIO(content)).convert('L')).enhance(2.0)
-                    text += pytesseract.image_to_string(img, lang="eng+tur")
+                    img = Image.open(io.BytesIO(content))
+                    text += pytesseract.image_to_string(img, lang="eng")
             except: pass
             
         text_blob += f" {fname} {text.lower()} "
         
-        # Numaraları Ayıkla (Herhangi bir yerde gördüğü an yakalar)
+        # MRZ içindeki bitişik harfleri ayırabilmek için (<) işaretlerini boşluğa çevir
+        clean_text_for_search = text.replace("<", " ").replace("\n", " ")
+        
+        # Numaraları Ayıkla (Kelime sınırları - \b - iptal edildi, gördüğü an yakalar)
         if not tckn:
-            m_tc = re.search(r'\b([1-9]\d{10})\b', text.replace("<", " "))
+            m_tc = re.search(r'(?<!\d)([1-9]\d{10})(?!\d)', clean_text_for_search)
             if m_tc: tckn = m_tc.group(1)
             
         if not pass_no:
-            m_pass = re.search(r'\b(U\d{8})\b', text.replace("<", " "), re.IGNORECASE)
+            m_pass = re.search(r'(U\d{8})', clean_text_for_search, re.IGNORECASE)
             if m_pass: pass_no = m_pass.group(1).upper()
             
         if not sb:
-            m_sb = re.search(r'\b([S58]\s*00\d{5,6})\b', text, re.IGNORECASE)
+            # Yapışık metinleri çekebilmesi için sınırları sildik (Örn: S004354015TUR...)
+            m_sb = re.search(r'([S58$]\s*00\d{5,7})', clean_text_for_search, re.IGNORECASE)
             if m_sb: sb = clean_sb(m_sb.group(1))
 
-    # İsim bulma (En sade yaklaşım)
+    # İsim bulma
     ignore = {"pdf", "jpg", "jpeg", "png", "xlsx", "sb", "pass", "medical", "coc", "stcw", "id", "kimlik", "cuzdan", "evrak", "belge", "nation"}
     best_name = ""
     for f in files:
+        if re.search(r'[0-9a-f]{10,}', f.name.lower()): continue
         clean_name = re.sub(r'[\d\W_]+', ' ', f.name.lower())
         words = [w.upper() for w in clean_name.split() if w not in ignore and len(w) > 2 and not w.isdigit()]
         if len(words) >= 2:
@@ -179,7 +183,7 @@ if uploaded_files:
     if not tckn_val or not sb_val:
         st.error("🚨 SİSTEM KİLİTLİ: TCKN veya Liman Cüzdan Numarası belgelerden otomatik okunamadı.")
     else:
-        st.success("✅ Veriler belgeden çekildi ve doğrulandı.")
+        st.success("✅ Veriler belgeden başarıyla çekildi.")
         uab_url = f"https://gemiadami.uab.gov.tr/verification/{tckn_val}/{sb_val}"
         st.markdown(f'<a href="{uab_url}" target="_blank" style="background-color: #0056b3; color: white; padding: 8px 16px; border-radius: 4px; text-decoration: none; font-weight: bold;">UAB Sorgulama Sayfasını Aç ↗</a>', unsafe_allow_html=True)
     
