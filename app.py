@@ -6,13 +6,11 @@ import re
 from dateutil.relativedelta import relativedelta
 import pypdf
 import openpyxl
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.styles import PatternFill, Font, Alignment
 import docx
 from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
 
 try:
     import pytesseract
@@ -31,6 +29,7 @@ def check_password():
         return True
 
     st.markdown("<h2 style='text-align: center; color: #1F3864;'>⚓ Blue Fin Crewing - Evrak Kontrol Portalı</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #666;'>Kanıta Dayalı Denetim: Liman cüzdanı doğrulanmadan evraklar onaylanmaz.</p>", unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1, 1.5, 1])
     with col2:
@@ -55,7 +54,7 @@ if st.sidebar.button("🚪 Çıkış Yap"):
     st.rerun()
 
 st.title("⚓ Evrak Kontrol & Denetim Portalı")
-st.caption("UAB Doğrulama Sistemi & Otomatik Şablon Motoru")
+st.caption("Genişletilmiş Esnek OCR & UAB Doğrulama Sistemi")
 
 RANKS_MAP = {
     "Master": 6, "Chief officer": 7, "2 nd Officer": 8, "3 rd Officer": 9,
@@ -69,23 +68,19 @@ ALL_RANKS = list(RANKS_MAP.keys())
 
 CERT_MATRIX = [
     (14, "1", "Passport", ALL_RANKS, ["pass", "pasaport"]),
-    (16, "2", "Medical Examination Report", ALL_RANKS, ["medical", "sağlık", "health"]),
-    (18, "3", "Certificate of Yellow Fever", ALL_RANKS, ["yellow", "fever", "humma", "aşı"]),
-    (20, "4", "Seamanbook", ALL_RANKS, ["sb", "seaman", "cüzdan", "s00"]),
+    (16, "2", "Medical Examination Report", ALL_RANKS, ["medical", "sağlık", "health", "saglik"]),
+    (18, "3", "Certificate of Yellow Fever", ALL_RANKS, ["yellow", "fever", "humma", "aşı", "asi"]),
+    (20, "4", "Seamanbook", ALL_RANKS, ["sb", "seaman", "cüzdan", "cuzdan", "s00"]),
     (22, "5", "Competency", ALL_RANKS, ["coc", "competency", "yeterlilik"]),
     (24, "6", "GMDSS", ["Master", "Chief officer", "2 nd Officer", "3 rd Officer"], ["gmdss", "goc"]),
-    (26, "7.1", "Fire Prevention and Fire Fighting", ALL_RANKS, ["stcw", "courses", "fire", "yangın"]),
+    (26, "7.1", "Fire Prevention and Fire Fighting", ALL_RANKS, ["stcw", "courses", "fire", "yangın", "yangin"]),
     (28, "7.2", "Personal Survival Techniques", ALL_RANKS, ["stcw", "courses", "survival", "can kurtarma"]),
-    (30, "7.3", "Elementary First Aid", ALL_RANKS, ["stcw", "courses", "first aid", "ilkyardım"]),
+    (30, "7.3", "Elementary First Aid", ALL_RANKS, ["stcw", "courses", "first aid", "ilkyardım", "yardim"]),
     (32, "7.4", "Personal Safety and Social Responsibility", ALL_RANKS, ["stcw", "courses", "social", "sorumluluk"]),
     (34, "7.5", "Proficiency in Survival Craft and Rescue Boats", ["Master", "Chief officer", "2 nd Officer", "3 rd Officer", "Chief Engineer", "2 nd Engineer", "3rd Engineer", "Electrician", "Bosun", "Pumpman", "AB", "Oiler"], ["stcw", "courses", "craft", "rescue"]),
-    (36, "8.1", "Security Awareness Certificate", ALL_RANKS, ["stcw", "courses", "security", "farkındalık"]),
-    (38, "8.2", "Designated Security Duties Certificate", ALL_RANKS, ["stcw", "courses", "security", "görev"]),
-    (42, "8.4", "Security - Realated Familirization", ALL_RANKS, ["stcw", "courses", "security", "tanıtım"]),
-    (44, "9.1", "Advanced Fire Fighting", ["Master", "Chief officer", "2 nd Officer", "3 rd Officer", "Chief Engineer", "2 nd Engineer", "3rd Engineer", "Electrician", "Bosun"], ["stcw", "advanced fire"]),
-    (46, "9.2", "Medical Care", ["Master", "Chief officer"], ["stcw", "medical care"]),
-    (64, "4.23", "Bridge Team Management (BTM)", ["Master", "Chief officer", "2 nd Officer", "3 rd Officer"], ["btm", "bridge"]),
-    (74, "4.3a", "ECDIS (Generic)", ["Master", "Chief officer", "2 nd Officer", "3 rd Officer"], ["ecdis", "generic"]),
+    (36, "8.1", "Security Awareness Certificate", ALL_RANKS, ["stcw", "courses", "security", "farkındalık", "farkindalik"]),
+    (38, "8.2", "Designated Security Duties Certificate", ALL_RANKS, ["stcw", "courses", "security", "görev", "gorev"]),
+    (42, "8.4", "Security - Realated Familirization", ALL_RANKS, ["stcw", "courses", "security", "tanıtım", "tanitim"]),
     (82, "5", "Endorsement (Bayrak Onayı)", OFFICER_RANKS + ["Deck Cadet", "Engine Cadet"], ["cra", "endorsement", "bayrak"])
 ]
 
@@ -95,6 +90,9 @@ vessel_flag = st.sidebar.selectbox("Gemi Bayrağı", ["MALTA", "MARSHALL ISLANDS
 ecdis_model = st.sidebar.text_input("Gemideki ECDIS Modeli", value="")
 rank = st.sidebar.selectbox("Atanan Rütbe", options=ALL_RANKS, index=17) 
 rank_col = RANKS_MAP[rank]
+
+# ÇÖZÜM 1: Zabit kontrol değişkeni geri eklendi (Çökme hatasını çözer)
+is_officer = rank in OFFICER_RANKS  
 join_date = st.sidebar.date_input("Katılış Tarihi", datetime.date.today())
 
 def clean_sb_format(raw_sb):
@@ -104,14 +102,25 @@ def clean_sb_format(raw_sb):
     return cleaned
 
 def extract_evidence(files):
-    best_name, tckn, sb, all_text_blob = "", "", "", ""
-    ignore_words = {"deck", "engine", "cadet", "pass", "medical", "sb", "coc", "desc", "criminal", "record", "identity", "register", "stcw", "yellow", "fever", "pdf", "jpg", "png", "xlsx"}
+    best_name = ""
+    tckn = ""
+    sb = ""
+    all_text_blob = ""
+    
+    # ÇÖZÜM 2: Türkçe evrak isimleri filtreye eklendi (ADLI SICIL KAYDI hatasını çözer)
+    ignore_words = {"deck", "engine", "cadet", "pass", "medical", "sb", "coc", "desc", "criminal", "record", 
+                    "identity", "register", "stcw", "yellow", "fever", "pdf", "jpg", "png", "jpeg", "xlsx", "xls",
+                    "adli", "sicil", "kaydi", "kaydı", "nufus", "nüfus", "ikametgah", "yerlesim", "yeri",
+                    "saglik", "sağlık", "belge", "belgesi", "cuzdan", "cüzdan", "cuzdani", "cüzdanı", "seaman",
+                    "book", "booklet", "diploma", "dekont", "makbuz", "sertifika", "sertifikasi", "certificate",
+                    "id", "card", "kimlik", "kart", "karti", "kartı", "rapor", "raporu", "report", "vesikalik",
+                    "foto", "photo", "visa", "vize", "contract", "sozlesme", "sözleşme", "scan", "tarama", "evrak"}
     
     for f in files:
         fname = f.name.lower()
         clean_name = re.sub(r'[\d\W_]+', ' ', fname)
         words = clean_name.split()
-        person_words = [w for w in words if w not in ignore_words and len(w) > 1]
+        person_words = [w for w in words if w not in ignore_words and len(w) > 1 and not w.isdigit()]
         if len(person_words) >= 2 and not best_name:
             best_name = " ".join(person_words).upper()
             
@@ -206,16 +215,12 @@ if uploaded_files:
     st.divider()
     st.subheader("📥 Çıktı Dosyaları")
 
-    # =========================================================================
-    # KUSURSUZ 35-101 EXCEL ÜRETİCİ (KOD İLE SIFIRDAN ÇİZİM - BOZULMAZ)
-    # =========================================================================
     def build_excel_export():
         wb = openpyxl.Workbook()
         ws1 = wb.active
         ws1.title = "35-101 Check List"
         ws1.views.sheetView[0].showGridLines = False
         
-        # Başlıklar
         ws1.merge_cells('C1:P2')
         ws1['C1'] = "SEAFARERS DOCUMENTS CHECK LIST (35-101)"
         ws1['C1'].font = Font(name="Calibri", size=14, bold=True, color="1F497D")
@@ -281,7 +286,6 @@ if uploaded_files:
         ws1.page_setup.fitToWidth = 1
         ws1.page_setup.fitToHeight = 1
         
-        # 2. SAYFA EVRAK DENETİM RAPORU (Sıfırdan Çizim)
         ws2 = wb.create_sheet(title="Evrak Denetim Raporu")
         ws2.views.sheetView[0].showGridLines = False
         ws2.merge_cells('A1:G2')
@@ -344,9 +348,6 @@ if uploaded_files:
         wb.save(buf)
         return buf.getvalue()
 
-    # =========================================================================
-    # KUSURSUZ 35-102 WORD ÜRETİCİ (KOD İLE SIFIRDAN ÇİZİM - BOZULMAZ)
-    # =========================================================================
     def build_word_export():
         doc = docx.Document()
         
