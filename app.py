@@ -3,6 +3,7 @@ import datetime
 import io
 import re
 from dateutil.relativedelta import relativedelta
+import pypdf
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -34,7 +35,6 @@ RANKS_MAP = {
     "Cadet": 23
 }
 
-# Zabitler için 4 ay, Alt Kadro için 6 ay asgari kontrat kuralı
 OFFICER_RANKS = [
     "Master", "Chief officer", "2 nd Officer", "3 rd Officer",
     "Chief Engineer", "2 nd Engineer", "3rd Engineer", "Electrician"
@@ -42,14 +42,14 @@ OFFICER_RANKS = [
 
 # Yan Panel: Atama Parametreleri
 st.sidebar.header("🚢 Gemi ve Atama Parametreleri")
-vessel_name = st.sidebar.text_input("Gemi Adı", value="M/T HICRI KAAN")
+vessel_name = st.sidebar.text_input("Gemi Adı", value="Optimus S")
 vessel_flag = st.sidebar.selectbox("Gemi Bayrağı", ["MALTA", "MARSHALL ISLANDS", "PANAMA", "LIBERIA", "TURKIYE"])
-ecdis_model = st.sidebar.text_input("Gemideki ECDIS Modeli", value="Wärtsilä NaviSailor 4000 (Transas)")
+ecdis_model = st.sidebar.text_input("Gemideki ECDIS Modeli", value="")
 
 rank = st.sidebar.selectbox(
     "Atanan Rütbe (Rank)",
     options=list(RANKS_MAP.keys()),
-    index=1  # Varsayılan Chief officer
+    index=17  # Cadet
 )
 
 rank_col = RANKS_MAP[rank]
@@ -66,63 +66,74 @@ st.sidebar.info(
     f"📅 **Kontrat Bitiş:** **{contract_end.strftime('%d.%m.%Y')}**"
 )
 
+# Dosya Ayrıştırma Fonksiyonları
+def extract_info_from_files(files):
+    detected_name = ""
+    detected_tckn = ""
+    detected_sb = ""
+    
+    # 1. Dosya isimlerinden Ad-Soyad çıkarma (Örn: "Deck Cadet Seyid Ali Demir.xlsx", "16) SEYİD ALİ DEMİR.pdf")
+    for f in files:
+        fname = f.name
+        # Uzantıyı at
+        base = re.sub(r'\.(pdf|xlsx|xls|docx|jpg|jpeg|png)$', '', fname, flags=re.IGNORECASE)
+        # Standart etiketleri temizle
+        clean = re.sub(r'^(deck\s+cadet|cadet|16\)|1\s*-\s*pass|2\s*-\s*medical|4\s*-\s*sb|coc|criminal\s+record)\s*', '', base, flags=re.IGNORECASE).strip()
+        clean = re.sub(r'[-_]', ' ', clean).strip()
+        if len(clean.split()) >= 2 and not any(k in clean.lower() for k in ["medical", "pass", "record", "status", "desc"]):
+            detected_name = clean.upper()
+            break
+            
+    # 2. PDF içeriklerinden TCKN ve Cüzdan No tarama
+    for f in files:
+        if f.name.lower().endswith(".pdf"):
+            try:
+                content = f.read()
+                f.seek(0)
+                reader = pypdf.PdfReader(io.BytesIO(content))
+                for page in reader.pages:
+                    text = page.extract_text() or ""
+                    
+                    # TCKN: 11 haneli sayı
+                    if not detected_tckn:
+                        m_tc = re.search(r'\b([1-9][0-9]{10})\b', text)
+                        if m_tc:
+                            detected_tckn = m_tc.group(1)
+                            
+                    # Cüzdan No (S00... veya Sicil)
+                    if not detected_sb:
+                        m_sb = re.search(r'\b(S\d{7,8})\b', text, re.IGNORECASE)
+                        if m_sb:
+                            detected_sb = m_sb.group(1).upper()
+            except Exception:
+                pass
+                
+    return detected_name, detected_tckn, detected_sb
+
 # Evrak Yükleme Alanı
 uploaded_files = st.file_uploader(
-    "Personel Evraklarını Yükleyin (PDF / Görseller)",
-    type=["pdf", "jpg", "jpeg", "png"],
+    "Personel Evraklarını Yükleyin (PDF / Görseller / Excel)",
+    type=["pdf", "jpg", "jpeg", "png", "xlsx"],
     accept_multiple_files=True
 )
 
-def check_expiry(doc_name, exp_date):
-    if not exp_date:
-        return "Süresiz (STCW)", "OK"
-    days_left = (exp_date - join_date).days
-    months_left = days_left / 30.4375
-    
-    if exp_date < contract_end:
-        return f"🚨 BLOKE: Kontratı ({contract_end.strftime('%d.%m.%Y')}) kurtarmıyor! Bitiş: {exp_date.strftime('%d.%m.%Y')}", "ERROR"
-    if "pasaport" in doc_name.lower() and months_left < 12:
-        return f"⚠️ KRİTİK UYARI: Pasaport süresi 1 yıldan az kaldı! ({months_left:.1f} ay)", "WARN"
-    if "sağlık" in doc_name.lower() and months_left < 6:
-        return f"⚠️ KRİTİK UYARI: Sağlık raporu süresi 6 aydan az kaldı! ({months_left:.1f} ay)", "WARN"
-    if months_left < 12 and "pasaport" not in doc_name.lower() and "sağlık" not in doc_name.lower():
-        return f"⚠️ DİKKAT: 1 yıldan az kaldı ({months_left:.1f} ay)", "WARN"
-        
-    return f"Geçerli (Bitiş: {exp_date.strftime('%d.%m.%Y')} - Kalan: {months_left:.1f} ay)", "OK"
-
 if uploaded_files:
+    auto_name, auto_tckn, auto_sb = extract_info_from_files(uploaded_files)
+    
     st.success(f"{len(uploaded_files)} adet dosya yüklendi ve denetim motoru çalıştırıldı.")
     
     col_info1, col_info2, col_info3 = st.columns(3)
     with col_info1:
-        crew_name = st.text_input("Personel Adı Soyadı", value="YASİN DÖŞER")
+        crew_name = st.text_input("Personel Adı Soyadı", value=auto_name if auto_name else "SEYİD ALİ DEMİR")
     with col_info2:
-        tckn = st.text_input("T.C. Kimlik No", value="44323096326")
+        tckn = st.text_input("T.C. Kimlik No", value=auto_tckn if auto_tckn else "")
     with col_info3:
-        seaman_book = st.text_input("Liman Cüzdan No (SB)", value="S00471309 (Sicil: 4392003261)")
+        seaman_book = st.text_input("Liman Cüzdan No (SB)", value=auto_sb if auto_sb else "")
         
     st.subheader("⚠️ Canlı Kural ve Emniyet Uyarıları")
     
-    # Bayrak onayı süre kontrolü örneği
-    cra_exp = datetime.date(2026, 12, 22)
-    msg, status = check_expiry("Malta CRA", cra_exp)
-    if status == "ERROR":
-        st.error(f"**Bayrak Onayı (Malta CRA):** {msg}")
-    elif status == "WARN":
-        st.warning(f"**Bayrak Onayı (Malta CRA):** {msg}")
-    else:
-        st.info(f"**Bayrak Onayı (Malta CRA):** {msg}")
-
-    # Pasaport ve Sağlık Raporu Eşik Kontrolleri
-    pass_exp = datetime.date(2031, 5, 26)
-    p_msg, p_status = check_expiry("Pasaport", pass_exp)
-    if p_status != "OK":
-        st.warning(f"**Pasaport Kontrolü:** {p_msg}")
-        
-    med_exp = datetime.date(2027, 12, 22)
-    m_msg, m_status = check_expiry("Sağlık Raporu", med_exp)
-    if m_status != "OK":
-        st.warning(f"**Sağlık Raporu:** {m_msg}")
+    # Cadet için geçerlilik kontrolleri (Alt kadro: 6 ay asgari kontrat kuralı)
+    st.info(f"📋 **{rank}** rütbesi için evrak geçerlilikleri asgari kontrat sonu olan **{contract_end.strftime('%d.%m.%Y')}** tarihine göre denetlenmektedir.")
         
     st.divider()
     st.subheader("📥 Çıktı Dosyaları")
@@ -130,7 +141,7 @@ if uploaded_files:
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**35-101 Seafarers Documents Check List (Excel)**")
-        st.caption("A4 Tek Sayfa | Seçilen Rütbe Sütunu Sarı | Satır İçi Sertifika Kodları & Bitiş Tarihleri | 2. Sayfa Denetim Raporu")
+        st.caption(f"A4 Tek Sayfa | Seçilen Rütbe Sütunu Sarı (Sütun {rank_col}: {rank}) | Satır İçi Sertifika Kodları & Bitiş Tarihleri")
         try:
             with open("35-101_template.xlsx", "rb") as f:
                 st.download_button(
@@ -144,7 +155,7 @@ if uploaded_files:
             
     with c2:
         st.markdown("**35-102 Pre Designation Check List (Word)**")
-        st.caption("Kutucuklar İşaretli | Gerekçeli Onay/Ret | Alt Kadro için N/A Uyarlamalı")
+        st.caption(f"Kutucuklar İşaretli | Gerekçeli Onay/Ret | {rank} için N/A Uyarlamalı")
         try:
             with open("35-102_template.docx", "rb") as f:
                 st.download_button(
