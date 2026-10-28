@@ -21,7 +21,7 @@ def check_password():
         return True
 
     st.markdown("<h2 style='text-align: center; color: #1F3864;'>⚓ Blue Fin Crewing - Evrak Kontrol Portalı</h2>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #666;'>Bu sistem yüksek güvenlikli ve KVKK uyumludur. Yüklenen veriler sunucuda saklanmaz.</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #666;'>Bu sistem yüksek güvenlikli ve KVKK uyumludur. Yüklenen veriler sunucu diskinde saklanmaz, oturum kapanınca bellekten silinir.</p>", unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1, 1.5, 1])
     with col2:
@@ -30,7 +30,6 @@ def check_password():
             password = st.text_input("Güvenlik Parolası", type="password")
             submit = st.form_submit_button("Giriş Yap", use_container_width=True)
             
-            # Şirket varsayılan giriş bilgileri (İstediğiniz zaman değiştirebilirsiniz)
             if submit:
                 if username == "bluefin" and password == "bluefin2026":
                     st.session_state["authenticated"] = True
@@ -43,9 +42,9 @@ if not check_password():
     st.stop()
 
 # ==============================================================================
-# ANA UYGULAMA (GİRİŞ YAPILDIKTAN SONRA ÇALIŞIR)
+# ANA UYGULAMA (OTURUM AÇILDIKTAN SONRA ÇALIŞIR)
 # ==============================================================================
-st.sidebar.markdown(f"🔒 **Güvenli Oturum:** Aktif (KVKK Uyumlu)")
+st.sidebar.markdown("🔒 **Güvenli Oturum:** Aktif (KVKK Uyumlu)")
 if st.sidebar.button("🚪 Güvenli Çıkış Yap"):
     st.session_state["authenticated"] = False
     st.rerun()
@@ -53,7 +52,7 @@ if st.sidebar.button("🚪 Güvenli Çıkış Yap"):
 st.title("⚓ Evrak Kontrol & Denetim Portalı")
 st.caption("35-101 Seafarers Documents & 35-102 Pre Designation Check List Otomasyonu")
 
-# 18 Rütbe ve Sütun Eşleşmeleri
+# 35-101 Formundaki 18 Rütbe ve Sütun Eşleşmeleri
 RANKS_MAP = {
     "Master": 6, "Chief officer": 7, "2 nd Officer": 8, "3 rd Officer": 9,
     "Chief Engineer": 10, "2 nd Engineer": 11, "3rd Engineer": 12, "Electrician": 13,
@@ -72,7 +71,7 @@ vessel_name = st.sidebar.text_input("Gemi Adı", value="Optimus S")
 vessel_flag = st.sidebar.selectbox("Gemi Bayrağı", ["MALTA", "MARSHALL ISLANDS", "PANAMA", "LIBERIA", "TURKIYE"])
 ecdis_model = st.sidebar.text_input("Gemideki ECDIS Modeli", value="")
 
-rank = st.sidebar.selectbox("Atanan Rütbe (Rank)", options=list(RANKS_MAP.keys()), index=17) # Cadet
+rank = st.sidebar.selectbox("Atanan Rütbe (Rank)", options=list(RANKS_MAP.keys()), index=17) # Varsayılan: Cadet
 rank_col = RANKS_MAP[rank]
 is_officer = rank in OFFICER_RANKS
 min_months = 4 if is_officer else 6
@@ -87,7 +86,7 @@ st.sidebar.info(
     f"📅 **Kontrat Bitiş:** **{contract_end.strftime('%d.%m.%Y')}**"
 )
 
-# Gelişmiş Liman Cüzdanı & Bilgi Tarayıcı
+# Gelişmiş Liman Cüzdanı & Bilgi Tarayıcı (Kelimeleri Eleme Filtreli)
 def extract_seafarer_data(files):
     name = ""
     tckn = ""
@@ -99,11 +98,11 @@ def extract_seafarer_data(files):
         base = re.sub(r'\.(pdf|xlsx|xls|docx|jpg|jpeg|png)$', '', fname, flags=re.IGNORECASE)
         clean = re.sub(r'^(deck\s+cadet|cadet|16\)|1\s*-\s*pass|2\s*-\s*medical|4\s*-\s*sb|coc|criminal\s+record)\s*', '', base, flags=re.IGNORECASE).strip()
         clean = re.sub(r'[-_]', ' ', clean).strip()
-        if len(clean.split()) >= 2 and not any(k in clean.lower() for k in ["medical", "pass", "record", "status", "desc", "guidance"]):
+        if len(clean.split()) >= 2 and not any(k in clean.lower() for k in ["medical", "pass", "record", "status", "desc", "guidance", "yellow", "fever"]):
             name = clean.upper()
             break
 
-    # 2. PDF metinlerinden TCKN ve Cüzdan No Arama
+    # 2. PDF metinlerinden TCKN ve Cüzdan No Tarama
     for f in files:
         if f.name.lower().endswith(".pdf"):
             try:
@@ -113,23 +112,32 @@ def extract_seafarer_data(files):
                 for page in reader.pages:
                     text = page.extract_text() or ""
                     
-                    # TCKN: 11 haneli sayı
+                    # TCKN Tespiti (11 haneli sayı)
                     if not tckn:
                         m_tc = re.search(r'\b([1-9][0-9]{10})\b', text)
                         if m_tc:
                             tckn = m_tc.group(1)
                             
-                    # Cüzdan No (S0... formatı veya Sicil No)
+                    # Cüzdan No Tespiti (Kelime filtreli)
                     if not sb:
-                        # Format 1: S00471309 gibi S ile başlayan 8-9 haneli
-                        m_sb = re.search(r'\b(S\d{7,8})\b', text, re.IGNORECASE)
-                        if m_sb:
-                            sb = m_sb.group(1).upper()
-                        # Format 2: "Cüzdan No" veya "Sicil No" ibaresinden sonra gelen numara
+                        # 1. Öncelik: S0... veya S... formatı (örn: S00471309 veya S00512849)
+                        m_s = re.search(r'\b(S00\d{5,7}|S\d{6,8})\b', text, re.IGNORECASE)
+                        if m_s:
+                            sb = m_s.group(1).upper()
+                        
+                        # 2. Öncelik: "Cüzdan No" veya "Seaman Book No" sonrasındaki kod
                         if not sb:
-                            m_sb2 = re.search(r'(?:Cüzdan|Sicil|Seaman\s*Book)\s*(?:No|Nu)?\s*[:\.]?\s*([A-Z0-9]{5,12})', text, re.IGNORECASE)
-                            if m_sb2:
-                                sb = m_sb2.group(1).upper()
+                            m_cuzdan = re.search(r'(?:Cüzdan\s*No|Cüzdan\s*Seri|Seaman\s*Book\s*No)\s*[:\.]?\s*([A-Z0-9]{6,12})', text, re.IGNORECASE)
+                            if m_cuzdan:
+                                val = m_cuzdan.group(1).upper()
+                                if val not in ["KAYDI", "SURETI", "BELGESI", "SISTEMI", "TURKIYE"]:
+                                    sb = val
+                                
+                        # 3. Öncelik: Sicil No (örn: 4392003261)
+                        if not sb:
+                            m_sicil = re.search(r'(?:Gemiadamı\s*Sicil|Kütük\s*Sicil|Sicil\s*No)\s*[:\.]?\s*(\d{6,11})', text, re.IGNORECASE)
+                            if m_sicil:
+                                sb = f"Sicil: {m_sicil.group(1)}"
             except Exception:
                 pass
                 
@@ -153,7 +161,7 @@ if uploaded_files:
     with col_info2:
         tckn = st.text_input("T.C. Kimlik No", value=auto_tckn if auto_tckn else "46708162756")
     with col_info3:
-        seaman_book = st.text_input("Liman Cüzdan No (SB)", value=auto_sb if auto_sb else "S00512849 (Sicil: 4392004812)")
+        seaman_book = st.text_input("Liman Cüzdan No (SB)", value=auto_sb if auto_sb else "")
         
     st.subheader("⚠️ Canlı Kural ve Emniyet Uyarıları")
     st.info(f"📋 **{rank}** rütbesi için evrak geçerlilikleri asgari kontrat sonu olan **{contract_end.strftime('%d.%m.%Y')}** ({min_months} ay) tarihine göre denetlenmektedir.")
@@ -161,7 +169,7 @@ if uploaded_files:
     st.divider()
     st.subheader("📥 Çıktı Dosyaları")
     
-    # Canlı Excel Oluşturucu (Template dosyasına bağımlılığı kaldıran güvenli motor)
+    # Canlı Excel Üretici (A4 Tek Sayfa, Renk Kodlu, Kesişme Mantıklı)
     def build_live_excel():
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -182,6 +190,9 @@ if uploaded_files:
         ws['H8'] = "Rank:"
         ws['N8'] = rank
         
+        for coord in ['C6', 'C8', 'N6', 'N8']:
+            ws[coord].font = Font(name="Calibri", size=10, bold=True, color="002060")
+        
         # Rütbe Başlıkları
         ws.cell(9, 1).value = "MANDATORY CERTIFICATES"
         for r_name, c_idx in RANKS_MAP.items():
@@ -194,12 +205,11 @@ if uploaded_files:
                 cell.font = Font(name="Calibri", size=9, bold=True)
             cell.alignment = Alignment(horizontal="center", vertical="center")
             
-        # Basit Örnek Satırlar
         sample_certs = [
-            (14, "1", "Passport", "Pasaport No: Mevcut | Süre Uygun"),
+            (14, "1", "Passport", "Pasaport | Süre Uygun"),
             (16, "2", "Medical Examination Report", "Gemiadamı Sağlık Belgesi | Süre Uygun"),
             (18, "3", "Certificate of Yellow Fever", "Sarı Humma Aşı Kartı | Süresiz"),
-            (20, "4", "Seamanbook", f"Liman Cüzdan No: {seaman_book}"),
+            (20, "4", "Seamanbook", f"Liman Cüzdan No: {seaman_book if seaman_book else 'Mevcut'}"),
             (26, "7.1", "Fire Prevention & Fire Fighting", "STCW Belgesi | Süre Uygun"),
             (28, "7.2", "Personal Survival Techniques", "STCW Belgesi | Süre Uygun"),
             (30, "7.3", "Elementary First Aid", "STCW Belgesi | Süre Uygun"),
@@ -217,13 +227,13 @@ if uploaded_files:
             ws.cell(r_idx+1, 2).value = f"► {note_str}"
             ws.cell(r_idx+1, 2).font = Font(name="Calibri", size=8.5, italic=True, color="1F3864")
             
-            # Kesişme noktasına kadar yeşil
+            # Kesişme noktasına kadar yeşil dolgu
             for r_sub in [r_idx, r_idx+1]:
                 for c in range(1, rank_col):
                     ws.cell(r_sub, c).fill = green_fill
                 ws.cell(r_sub, rank_col).fill = yellow_fill
                 
-        # A4 Tek Sayfa Yazdırma Koruması
+        # A4 Tek Sayfa Yazdırma Düzeni
         ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
         ws.page_setup.fitToWidth = 1
         ws.page_setup.fitToHeight = 1
