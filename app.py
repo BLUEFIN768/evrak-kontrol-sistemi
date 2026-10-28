@@ -12,7 +12,6 @@ from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 
-# NOKTA ATIŞI OCR (Görselden Okuma) ALTYAPISI
 try:
     import pytesseract
     from pdf2image import convert_from_bytes
@@ -23,9 +22,6 @@ except ImportError:
 
 st.set_page_config(page_title="Evrak Kontrol Portalı", page_icon="⚓", layout="wide")
 
-# ==============================================================================
-# GÜVENLİK PROTOKOLÜ (KVKK)
-# ==============================================================================
 def check_password():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
@@ -33,13 +29,13 @@ def check_password():
         return True
 
     st.markdown("<h2 style='text-align: center; color: #1F3864;'>⚓ Blue Fin Crewing - Evrak Kontrol Portalı</h2>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #666;'>Katı Kural: Liman cüzdanı yüklenmeden ve doğrulanmadan evraklar onaylanmaz.</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #666;'>Kanıta Dayalı Denetim: Liman cüzdanı doğrulanmadan evraklar onaylanmaz.</p>", unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1, 1.5, 1])
     with col2:
         with st.form("login_form"):
             username = st.text_input("Yetkili Kullanıcı")
-            password = st.text_input("Güvenlik Parolası", type="password", help="bluefin / bluefin2026")
+            password = st.text_input("Güvenlik Parolası", type="password")
             submit = st.form_submit_button("Giriş Yap", use_container_width=True)
             if submit:
                 if username == "bluefin" and password == "bluefin2026":
@@ -58,10 +54,7 @@ if st.sidebar.button("🚪 Çıkış Yap"):
     st.rerun()
 
 st.title("⚓ Evrak Kontrol & Denetim Portalı")
-st.caption("Cüzdan Odaklı Otomatik OCR & UAB Doğrulama Sistemi")
-
-if not OCR_AVAILABLE:
-    st.error("🚨 KILIT HATA: OCR (Görsel Okuma) Motoru Başlatılamadı! Lütfen GitHub 'packages.txt' ve 'requirements.txt' dosyalarının tam olduğundan emin olun.")
+st.caption("Genişletilmiş Esnek OCR & UAB Doğrulama Sistemi")
 
 RANKS_MAP = {
     "Master": 6, "Chief officer": 7, "2 nd Officer": 8, "3 rd Officer": 9,
@@ -99,9 +92,14 @@ rank = st.sidebar.selectbox("Atanan Rütbe", options=ALL_RANKS, index=17)
 rank_col = RANKS_MAP[rank]
 join_date = st.sidebar.date_input("Katılış Tarihi", datetime.date.today())
 
-# ==============================================================================
-# HEDEFLİ OCR VE KESİN CÜZDAN BULUCU MOTOR
-# ==============================================================================
+def clean_sb_format(raw_sb):
+    """Bulunan numarayı UAB sistemine uygun formata sokar."""
+    cleaned = re.sub(r'[^a-zA-Z0-9]', '', raw_sb).upper()
+    if cleaned.startswith('S') and not cleaned.startswith('S00'):
+        # Örneğin S512849 gibi eksik sıfırlı okuduysa
+        cleaned = cleaned.replace('S', 'S00', 1)
+    return cleaned
+
 def extract_evidence(files):
     best_name = ""
     tckn = ""
@@ -112,7 +110,7 @@ def extract_evidence(files):
                     "identity", "register", "military", "status", "stcw", "yellow", "fever", "courses", 
                     "sea", "service", "document", "guidance", "check", "list", "pdf", "jpg", "jpeg", "png", "xlsx", "xls"}
     
-    # 1. DOSYA ADLARINDAN PERSONEL İSMİ BULMA
+    # 1. DOSYA İSMİNDEN AD-SOYAD
     for f in files:
         fname = f.name.lower()
         clean_name = re.sub(r'[\d\W_]+', ' ', fname)
@@ -121,60 +119,81 @@ def extract_evidence(files):
         if len(person_words) >= 2 and not best_name:
             best_name = " ".join(person_words).upper()
             
-    # 2. DİJİTAL METİNLERİ (TCKN vb.) HIZLICA TARA
+    # 2. EXCEL'DEN KAPSAMLI VERİ ÇEKİMİ (En güvenilir kaynak)
     for f in files:
-        fname = f.name.lower()
-        all_text_blob += f" {fname} "
-        if fname.endswith(".pdf"):
+        if f.name.lower().endswith(('.xlsx', '.xls')):
             try:
                 content = f.read()
                 f.seek(0)
+                wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+                for sheet in wb.worksheets:
+                    for r in range(1, 50):
+                        for c in range(1, 15):
+                            val = str(sheet.cell(r, c).value or "").strip()
+                            all_text_blob += f" {val.lower()} "
+                            if not tckn and re.match(r'^[1-9]\d{10}$', val):
+                                tckn = val
+                            if not sb:
+                                # Daha esnek Regex (S ile başlayan, arada boşluk olabilen, 5-8 haneli)
+                                m_sb = re.search(r'\b[Ss]\s*[\-\.]?\s*0*\d{4,8}\b', val)
+                                if m_sb: 
+                                    sb = clean_sb_format(m_sb.group(0))
+            except Exception:
+                pass
+
+    # 3. PDF VE GÖRSELLERİ TARAMA & ESNEK OCR
+    for f in files:
+        fname = f.name.lower()
+        all_text_blob += f" {fname} "
+        file_text = ""
+        
+        content = f.read()
+        f.seek(0)
+        
+        if fname.endswith(".pdf"):
+            try:
                 reader = pypdf.PdfReader(io.BytesIO(content))
                 for page in reader.pages:
-                    text = page.extract_text() or ""
-                    all_text_blob += f" {text.lower()} "
-                    if not tckn:
-                        m_tc = re.search(r'\b([1-9][0-9]{10})\b', text)
-                        if m_tc: tckn = m_tc.group(1)
+                    file_text += (page.extract_text() or "") + " "
             except Exception:
                 pass
                 
-    # 3. KESİN KURAL: LİMAN CÜZDANINI NOKTA ATIŞI GÖRSELDEN OKU (Sadece "sb", "seaman", "cüzdan" geçen dosyalar)
-    if not sb and OCR_AVAILABLE:
-        for f in files:
-            fname = f.name.lower()
-            if any(k in fname for k in ["sb", "seaman", "cüzdan"]):
-                try:
-                    content = f.read()
-                    f.seek(0)
-                    extracted_ocr_text = ""
-                    
-                    if fname.endswith(".pdf"):
-                        # Sadece ilk sayfayı resme çevir (Kilitlenmeyi önler)
-                        images = convert_from_bytes(content, first_page=1, last_page=1)
-                        if images:
-                            extracted_ocr_text = pytesseract.image_to_string(images[0], lang="eng")
-                    elif fname.endswith((".jpg", ".jpeg", ".png")):
-                        img = Image.open(io.BytesIO(content))
-                        extracted_ocr_text = pytesseract.image_to_string(img, lang="eng")
-                        
-                    # Bulunan görsel metin içerisinde Türkiye SB (S00...) numarasını ara
-                    if extracted_ocr_text:
-                        m_s = re.search(r'\b(S00\d{5,7}|S0\d{6,8}|S\d{7,8})\b', extracted_ocr_text, re.IGNORECASE)
-                        if m_s:
-                            sb = m_s.group(1).upper()
-                            break # Numarayı bulduktan sonra döngüyü sonlandır
-                except Exception:
-                    pass
+        # Okunamayan PDF veya doğrudan görselse OCR devreye girer
+        if len(file_text.strip()) < 50 and OCR_AVAILABLE and not sb:
+            try:
+                if fname.endswith(".pdf"):
+                    images = convert_from_bytes(content, first_page=1, last_page=1)
+                    if images:
+                        file_text += pytesseract.image_to_string(images[0], lang="eng+tur") + " "
+                elif fname.endswith((".jpg", ".jpeg", ".png")):
+                    img = Image.open(io.BytesIO(content))
+                    file_text += pytesseract.image_to_string(img, lang="eng+tur") + " "
+            except Exception:
+                pass
+                
+        all_text_blob += f" {file_text.lower()} "
+        
+        if not tckn:
+            m_tc = re.search(r'\b([1-9][0-9]{10})\b', file_text)
+            if m_tc: tckn = m_tc.group(1)
+            
+        if not sb:
+            # Genişletilmiş ve esnek cüzdan yakalayıcı: 'S 00512849', 'S-00512849', '$00512849', veya '4392003261' (Sicil)
+            m_s = re.search(r'\b[S$Şsş]\s*[\-\.]?\s*0*\d{5,8}\b', file_text, re.IGNORECASE)
+            if m_s: 
+                sb = clean_sb_format(m_s.group(0).replace('$', 'S'))
+            else:
+                m_cuz = re.search(r'(?:Cüzdan|Seaman\s*Book|Sicil)\s*(?:No|Seri)?\s*[:\.\-]?\s*([A-Z0-9]{6,12})', file_text, re.IGNORECASE)
+                if m_cuz and m_cuz.group(1).upper() not in ["KAYDI", "SURETI", "BELGESI", "SISTEMI"]:
+                    sb = clean_sb_format(m_cuz.group(1))
 
     return best_name, tckn, sb, all_text_blob
 
-# Arayüz Yükleyici
-uploaded_files = st.file_uploader("Personel Evraklarını Yükleyin (SB, Pasaport vb.)", type=["pdf", "jpg", "jpeg", "png", "xlsx"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Personel Evraklarını Yükleyin", type=["pdf", "jpg", "jpeg", "png", "xlsx"], accept_multiple_files=True)
 
 if uploaded_files:
     auto_name, auto_tckn, auto_sb, evidence_text = extract_evidence(uploaded_files)
-    st.success("✅ Belgeler tarandı. TCKN ve Cüzdan numarası ayıklandı.")
+    st.success("✅ Tüm evraklar derin taramadan geçirildi. TCKN ve Cüzdan numarası ayıklandı.")
     
     col_info1, col_info2, col_info3 = st.columns(3)
     with col_info1:
@@ -182,14 +201,14 @@ if uploaded_files:
     with col_info2:
         tckn_input = st.text_input("T.C. Kimlik No", value=auto_tckn)
     with col_info3:
-        sb_input = st.text_input("Liman Cüzdan No (SB)", value=auto_sb, placeholder="Zorunlu Alan")
+        sb_input = st.text_input("Liman Cüzdan No (SB)", value=auto_sb, placeholder="Sistem bulamazsa manuel girin")
         
     clean_tckn = re.sub(r'\D', '', tckn_input)
     clean_sb = re.sub(r'[^A-Za-z0-9]', '', sb_input).upper()
     
     validation_locked = False
     if not clean_tckn or not clean_sb:
-        st.error("🚨 **KATI DENETİM KİLİDİ:** TCKN veya Liman Cüzdan Numarası eksik/okunamadı! Evrak onayları kilitlendi.")
+        st.error("🚨 **KATI DENETİM KİLİDİ:** TCKN veya Liman Cüzdan Numarası eksik/okunamadı! Formlar bloke edildi.")
         validation_locked = True
     else:
         uab_url = f"https://gemiadami.uab.gov.tr/verification/{clean_tckn}/{clean_sb}"
