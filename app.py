@@ -90,8 +90,6 @@ vessel_flag = st.sidebar.selectbox("Gemi Bayrağı", ["MALTA", "MARSHALL ISLANDS
 ecdis_model = st.sidebar.text_input("Gemideki ECDIS Modeli", value="")
 rank = st.sidebar.selectbox("Atanan Rütbe", options=ALL_RANKS, index=17) 
 rank_col = RANKS_MAP[rank]
-
-# ÇÖZÜM 1: Zabit kontrol değişkeni geri eklendi (Çökme hatasını çözer)
 is_officer = rank in OFFICER_RANKS  
 join_date = st.sidebar.date_input("Katılış Tarihi", datetime.date.today())
 
@@ -107,7 +105,6 @@ def extract_evidence(files):
     sb = ""
     all_text_blob = ""
     
-    # ÇÖZÜM 2: Türkçe evrak isimleri filtreye eklendi (ADLI SICIL KAYDI hatasını çözer)
     ignore_words = {"deck", "engine", "cadet", "pass", "medical", "sb", "coc", "desc", "criminal", "record", 
                     "identity", "register", "stcw", "yellow", "fever", "pdf", "jpg", "png", "jpeg", "xlsx", "xls",
                     "adli", "sicil", "kaydi", "kaydı", "nufus", "nüfus", "ikametgah", "yerlesim", "yeri",
@@ -116,13 +113,22 @@ def extract_evidence(files):
                     "id", "card", "kimlik", "kart", "karti", "kartı", "rapor", "raporu", "report", "vesikalik",
                     "foto", "photo", "visa", "vize", "contract", "sozlesme", "sözleşme", "scan", "tarama", "evrak"}
     
+    name_candidates = {}
     for f in files:
         fname = f.name.lower()
+        # Eğer dosya adı karmaşık hex/hash kodu içeriyorsa isim aramasına dahil etme
+        if re.search(r'[0-9a-f]{10,}', fname) or "whatsapp" in fname:
+            continue
+            
         clean_name = re.sub(r'[\d\W_]+', ' ', fname)
         words = clean_name.split()
         person_words = [w for w in words if w not in ignore_words and len(w) > 1 and not w.isdigit()]
-        if len(person_words) >= 2 and not best_name:
-            best_name = " ".join(person_words).upper()
+        if len(person_words) >= 2:
+            candidate = " ".join(person_words).upper()
+            name_candidates[candidate] = name_candidates.get(candidate, 0) + 1
+            
+    if name_candidates:
+        best_name = max(name_candidates, key=name_candidates.get)
             
     for f in files:
         if f.name.lower().endswith(('.xlsx', '.xls')):
@@ -182,7 +188,6 @@ uploaded_files = st.file_uploader("Personel Evraklarını Yükleyin", type=["pdf
 
 if uploaded_files:
     auto_name, auto_tckn, auto_sb, evidence_text = extract_evidence(uploaded_files)
-    st.success("✅ Belgeler tarandı. TCKN ve Cüzdan numarası ayıklandı.")
     
     col_info1, col_info2, col_info3 = st.columns(3)
     with col_info1:
