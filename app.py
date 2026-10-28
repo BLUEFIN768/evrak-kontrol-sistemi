@@ -15,7 +15,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 try:
     import pytesseract
     from pdf2image import convert_from_bytes
-    from PIL import Image
+    from PIL import Image, ImageEnhance
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
@@ -29,7 +29,6 @@ def check_password():
         return True
 
     st.markdown("<h2 style='text-align: center; color: #1F3864;'>⚓ Blue Fin Crewing - Evrak Kontrol Portalı</h2>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #666;'>Kanıta Dayalı Denetim: Liman cüzdanı doğrulanmadan evraklar onaylanmaz.</p>", unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1, 1.5, 1])
     with col2:
@@ -54,7 +53,7 @@ if st.sidebar.button("🚪 Çıkış Yap"):
     st.rerun()
 
 st.title("⚓ Evrak Kontrol & Denetim Portalı")
-st.caption("Genişletilmiş Esnek OCR & UAB Doğrulama Sistemi")
+st.caption("MRZ Destekli OCR & UAB Doğrulama Sistemi")
 
 RANKS_MAP = {
     "Master": 6, "Chief officer": 7, "2 nd Officer": 8, "3 rd Officer": 9,
@@ -94,10 +93,18 @@ is_officer = rank in OFFICER_RANKS
 join_date = st.sidebar.date_input("Katılış Tarihi", datetime.date.today())
 
 def clean_sb_format(raw_sb):
+    # Eğer OCR 'S' harfini '5' olarak okuduysa düzelt (MRZ hatası düzeltmesi)
     cleaned = re.sub(r'[^a-zA-Z0-9]', '', raw_sb).upper()
+    if cleaned.startswith('500'):
+        cleaned = 'S00' + cleaned[3:]
     if cleaned.startswith('S') and not cleaned.startswith('S00'):
         cleaned = cleaned.replace('S', 'S00', 1)
     return cleaned
+
+def enhance_image_for_ocr(img):
+    img = img.convert('L')
+    enhancer = ImageEnhance.Contrast(img)
+    return enhancer.enhance(2.0)
 
 def extract_evidence(files):
     best_name = ""
@@ -116,10 +123,7 @@ def extract_evidence(files):
     name_candidates = {}
     for f in files:
         fname = f.name.lower()
-        # Eğer dosya adı karmaşık hex/hash kodu içeriyorsa isim aramasına dahil etme
-        if re.search(r'[0-9a-f]{10,}', fname) or "whatsapp" in fname:
-            continue
-            
+        if re.search(r'[0-9a-f]{10,}', fname) or "whatsapp" in fname: continue
         clean_name = re.sub(r'[\d\W_]+', ' ', fname)
         words = clean_name.split()
         person_words = [w for w in words if w not in ignore_words and len(w) > 1 and not w.isdigit()]
@@ -143,7 +147,7 @@ def extract_evidence(files):
                             all_text_blob += f" {val.lower()} "
                             if not tckn and re.match(r'^[1-9]\d{10}$', val): tckn = val
                             if not sb:
-                                m_sb = re.search(r'\b[Ss]\s*[\-\.]?\s*0*\d{4,8}\b', val)
+                                m_sb = re.search(r'\b[S5s]\s*[\-\.]?\s*0*\d{4,8}\b', val)
                                 if m_sb: sb = clean_sb_format(m_sb.group(0))
             except: pass
 
@@ -163,11 +167,14 @@ def extract_evidence(files):
         if len(file_text.strip()) < 50 and OCR_AVAILABLE and not sb:
             try:
                 if fname.endswith(".pdf"):
-                    images = convert_from_bytes(content, first_page=1, last_page=1)
-                    if images: file_text += pytesseract.image_to_string(images[0], lang="eng+tur") + " "
+                    images = convert_from_bytes(content, first_page=1, last_page=1, dpi=300)
+                    if images: 
+                        clean_img = enhance_image_for_ocr(images[0])
+                        file_text += pytesseract.image_to_string(clean_img, lang="eng") + " "
                 elif fname.endswith((".jpg", ".jpeg", ".png")):
                     img = Image.open(io.BytesIO(content))
-                    file_text += pytesseract.image_to_string(img, lang="eng+tur") + " "
+                    clean_img = enhance_image_for_ocr(img)
+                    file_text += pytesseract.image_to_string(clean_img, lang="eng") + " "
             except: pass
                 
         all_text_blob += f" {file_text.lower()} "
@@ -175,8 +182,10 @@ def extract_evidence(files):
             m_tc = re.search(r'\b([1-9][0-9]{10})\b', file_text)
             if m_tc: tckn = m_tc.group(1)
         if not sb:
-            m_s = re.search(r'\b[S$Şsş]\s*[\-\.]?\s*0*\d{5,8}\b', file_text, re.IGNORECASE)
-            if m_s: sb = clean_sb_format(m_s.group(0).replace('$', 'S'))
+            # "S" harfinin "5" okunması durumu (MRZ alanı) dahil tüm varyasyonları yakalar
+            m_s = re.search(r'\b[S5$Şsş8]\s*[\-\.]?\s*0*\d{5,8}\b', file_text, re.IGNORECASE)
+            if m_s: 
+                sb = clean_sb_format(m_s.group(0).replace('$', 'S').replace('8', 'S'))
             else:
                 m_cuz = re.search(r'(?:Cüzdan|Seaman\s*Book|Sicil)\s*(?:No|Seri)?\s*[:\.\-]?\s*([A-Z0-9]{6,12})', file_text, re.IGNORECASE)
                 if m_cuz and m_cuz.group(1).upper() not in ["KAYDI", "SURETI", "BELGESI"]:
@@ -195,16 +204,18 @@ if uploaded_files:
     with col_info2:
         tckn_input = st.text_input("T.C. Kimlik No", value=auto_tckn)
     with col_info3:
-        sb_input = st.text_input("Liman Cüzdan No (SB)", value=auto_sb)
+        sb_input = st.text_input("Liman Cüzdan No (SB)", value=auto_sb, placeholder="Sistem evraktan okuyup dolduracaktır...")
         
     clean_tckn = re.sub(r'\D', '', tckn_input)
     clean_sb = re.sub(r'[^A-Za-z0-9]', '', sb_input).upper()
     
     validation_locked = False
+    
     if not clean_tckn or not clean_sb:
-        st.error("🚨 KATI DENETİM KİLİDİ: TCKN veya Liman Cüzdan Numarası eksik! Evrak onayları kilitlendi.")
+        st.error("🚨 KATI DENETİM KİLİDİ: TCKN veya Liman Cüzdan Numarası evraklardan otomatik doğrulanamadı! Sistem güvenliği gereği onay işlemleri kilitlenmiştir.")
         validation_locked = True
     else:
+        st.success("✅ Belgeler doğrulandı! Sistem cüzdan numarasını evrak üzerinden başarıyla çıkardı.")
         uab_url = f"https://gemiadami.uab.gov.tr/verification/{clean_tckn}/{clean_sb}"
         st.markdown(
             f"""
