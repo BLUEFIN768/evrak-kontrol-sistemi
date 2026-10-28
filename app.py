@@ -66,7 +66,7 @@ ALL_RANKS = list(RANKS_MAP.keys())
 
 CERT_MATRIX = [
     (14, "1", "Passport", ALL_RANKS, ["pass", "pasaport"]),
-    (16, "2", "Medical Examination Report", ALL_RANKS, ["medical", "sağlık", "health"]),
+    (16, "2", "Medical Examination Report", ALL_RANKS, ["medical", "sağlık", "health", "nation"]),
     (18, "3", "Certificate of Yellow Fever", ALL_RANKS, ["yellow", "fever", "humma"]),
     (20, "4", "Seamanbook", ALL_RANKS, ["sb", "seaman", "cüzdan", "s00"]),
     (22, "5", "Competency", ALL_RANKS, ["coc", "competency"]),
@@ -131,16 +131,16 @@ def extract_data(files):
                 if fname.endswith(".pdf"):
                     images = convert_from_bytes(content, first_page=1, last_page=1, dpi=300)
                     if images: 
-                        img = ImageEnhance.Contrast(images[0].convert('L')).enhance(2.5)
-                        text += pytesseract.image_to_string(img, lang="eng")
+                        img = ImageEnhance.Contrast(images[0].convert('L')).enhance(2.0)
+                        text += pytesseract.image_to_string(img, lang="eng+tur")
                 elif fname.endswith((".jpg", ".jpeg", ".png")):
-                    img = ImageEnhance.Contrast(Image.open(io.BytesIO(content)).convert('L')).enhance(2.5)
-                    text += pytesseract.image_to_string(img, lang="eng")
+                    img = ImageEnhance.Contrast(Image.open(io.BytesIO(content)).convert('L')).enhance(2.0)
+                    text += pytesseract.image_to_string(img, lang="eng+tur")
             except: pass
             
         text_blob += f" {fname} {text.lower()} "
         
-        # Numaraları Ayıkla
+        # Numaraları Ayıkla (Herhangi bir yerde gördüğü an yakalar)
         if not tckn:
             m_tc = re.search(r'\b([1-9]\d{10})\b', text.replace("<", " "))
             if m_tc: tckn = m_tc.group(1)
@@ -154,11 +154,11 @@ def extract_data(files):
             if m_sb: sb = clean_sb(m_sb.group(1))
 
     # İsim bulma (En sade yaklaşım)
-    ignore = {"pdf", "jpg", "jpeg", "png", "xlsx", "sb", "pass", "medical", "coc", "stcw", "id", "kimlik", "cuzdan", "evrak", "belge"}
+    ignore = {"pdf", "jpg", "jpeg", "png", "xlsx", "sb", "pass", "medical", "coc", "stcw", "id", "kimlik", "cuzdan", "evrak", "belge", "nation"}
     best_name = ""
     for f in files:
         clean_name = re.sub(r'[\d\W_]+', ' ', f.name.lower())
-        words = [w.upper() for w in clean_name.split() if w not in ignore and len(w) > 2]
+        words = [w.upper() for w in clean_name.split() if w not in ignore and len(w) > 2 and not w.isdigit()]
         if len(words) >= 2:
             best_name = " ".join(words)
             break
