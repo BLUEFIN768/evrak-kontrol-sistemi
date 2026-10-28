@@ -12,15 +12,6 @@ from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 
-# OCR (Görselden Metin Okuma) Kütüphaneleri
-try:
-    import pytesseract
-    from pdf2image import convert_from_bytes
-    from PIL import Image
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
-
 st.set_page_config(page_title="Evrak Kontrol Portalı", page_icon="⚓", layout="wide")
 
 # ==============================================================================
@@ -33,7 +24,7 @@ def check_password():
         return True
 
     st.markdown("<h2 style='text-align: center; color: #1F3864;'>⚓ Blue Fin Crewing - Evrak Kontrol Portalı</h2>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #666;'>Katı Denetim Modu: Doğrulanamayan hiçbir belgeye onay verilmez.</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #666;'>Kanıta Dayalı Denetim: Belgeler doğrulanmadan onay verilmez.</p>", unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1, 1.5, 1])
     with col2:
@@ -58,10 +49,7 @@ if st.sidebar.button("🚪 Çıkış Yap"):
     st.rerun()
 
 st.title("⚓ Evrak Kontrol & Denetim Portalı")
-st.caption("Kanıta Dayalı Denetim & UAB Doğrulama Sistemi")
-
-if not OCR_AVAILABLE:
-    st.warning("⚠️ OCR Motoru Başlatılamadı! Lütfen GitHub reponuzda 'packages.txt' ve 'requirements.txt' dosyalarının doğruluğunu kontrol edin. Taranmış cüzdanlar şu an okunamıyor.")
+st.caption("Hibrid Doğrulama: Hızlı Dijital Tarama + Operatör Kontrolü")
 
 RANKS_MAP = {
     "Master": 6, "Chief officer": 7, "2 nd Officer": 8, "3 rd Officer": 9,
@@ -73,7 +61,6 @@ RANKS_MAP = {
 OFFICER_RANKS = ["Master", "Chief officer", "2 nd Officer", "3 rd Officer", "Chief Engineer", "2 nd Engineer", "3rd Engineer", "Electrician"]
 ALL_RANKS = list(RANKS_MAP.keys())
 
-# Sertifika Matrisi
 CERT_MATRIX = [
     (14, "1", "Passport", ALL_RANKS, ["pass", "pasaport"]),
     (16, "2", "Medical Examination Report", ALL_RANKS, ["medical", "sağlık", "health"]),
@@ -92,17 +79,14 @@ CERT_MATRIX = [
     (82, "5", "Endorsement (Bayrak Onayı)", OFFICER_RANKS + ["Deck Cadet", "Engine Cadet"], ["cra", "endorsement", "bayrak"])
 ]
 
-# Yan Panel
 st.sidebar.header("🚢 Gemi ve Atama Parametreleri")
 vessel_name = st.sidebar.text_input("Gemi Adı", value="Optimus S")
 vessel_flag = st.sidebar.selectbox("Gemi Bayrağı", ["MALTA", "MARSHALL ISLANDS", "PANAMA", "LIBERIA", "TURKIYE"])
 ecdis_model = st.sidebar.text_input("Gemideki ECDIS Modeli", value="")
 rank = st.sidebar.selectbox("Atanan Rütbe", options=ALL_RANKS, index=17) 
 rank_col = RANKS_MAP[rank]
-is_officer = rank in OFFICER_RANKS
 join_date = st.sidebar.date_input("Katılış Tarihi", datetime.date.today())
 
-# OCR VE BİLGİ AYRIŞTIRMA MOTORU
 def extract_evidence(files):
     best_name = ""
     tckn = ""
@@ -111,7 +95,7 @@ def extract_evidence(files):
     
     ignore_words = {"deck", "engine", "cadet", "pass", "medical", "sb", "coc", "desc", "criminal", "record", 
                     "identity", "register", "military", "status", "stcw", "yellow", "fever", "courses", 
-                    "sea", "service", "document", "guidance", "check", "list"}
+                    "sea", "service", "document", "guidance", "check", "list", "pdf", "jpg", "jpeg", "png"}
     
     for f in files:
         fname = f.name.lower()
@@ -122,53 +106,25 @@ def extract_evidence(files):
         if len(person_words) >= 2 and not best_name:
             best_name = " ".join(person_words).upper()
             
-        file_text = ""
-        content = f.read()
-        f.seek(0)
-        
+        all_text_blob += f" {fname} "
         if fname.endswith(".pdf"):
             try:
+                content = f.read()
+                f.seek(0)
                 reader = pypdf.PdfReader(io.BytesIO(content))
                 for page in reader.pages:
-                    file_text += (page.extract_text() or "") + " "
-            except:
+                    text = page.extract_text() or ""
+                    all_text_blob += f" {text.lower()} "
+                    
+                    if not tckn:
+                        m_tc = re.search(r'\b([1-9][0-9]{10})\b', text)
+                        if m_tc: tckn = m_tc.group(1)
+            except Exception:
                 pass
                 
-            # Eğer okunan metin çok kısaysa (taranmış fotoğraf) ve OCR devredeyse resmi oku
-            if len(file_text.strip()) < 50 and OCR_AVAILABLE:
-                try:
-                    images = convert_from_bytes(content)
-                    for img in images:
-                        file_text += pytesseract.image_to_string(img, lang="eng+tur") + " "
-                except:
-                    pass
-                    
-        elif fname.endswith((".jpg", ".jpeg", ".png")) and OCR_AVAILABLE:
-            try:
-                img = Image.open(io.BytesIO(content))
-                file_text += pytesseract.image_to_string(img, lang="eng+tur") + " "
-            except:
-                pass
-                
-        all_text_blob += file_text + " "
-        
-        # TCKN ve SB Bulma (OCR Edilmiş Metin Üzerinde)
-        if not tckn:
-            m_tc = re.search(r'\b([1-9][0-9]{10})\b', file_text)
-            if m_tc: tckn = m_tc.group(1)
-            
-        if not sb:
-            m_s = re.search(r'\b(S00\d{5,7}|S0\d{6,8}|S\d{7,8})\b', file_text, re.IGNORECASE)
-            if m_s:
-                sb = m_s.group(1).upper()
-            if not sb:
-                m_cuz = re.search(r'(?:Cüzdan|Seaman\s*Book|Sicil)\s*(?:No|Seri)?\s*[:\.\-]?\s*([A-Z0-9]{6,12})', file_text, re.IGNORECASE)
-                if m_cuz and m_cuz.group(1).upper() not in ["KAYDI", "SURETI", "BELGESI", "SISTEMI"]:
-                    sb = m_cuz.group(1).upper()
-                    
     return best_name, tckn, sb, all_text_blob
 
-uploaded_files = st.file_uploader("Personel Evraklarını Yükleyin (PDF / Görseller)", type=["pdf", "jpg", "jpeg", "png", "xlsx"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Personel Evraklarını Yükleyin (Çoklu Seçim)", type=["pdf", "jpg", "jpeg", "png"], accept_multiple_files=True)
 
 if uploaded_files:
     auto_name, auto_tckn, auto_sb, evidence_text = extract_evidence(uploaded_files)
@@ -179,15 +135,14 @@ if uploaded_files:
     with col_info2:
         tckn_input = st.text_input("T.C. Kimlik No", value=auto_tckn)
     with col_info3:
-        sb_input = st.text_input("Liman Cüzdan No (SB)", value=auto_sb, placeholder="Zorunlu Alan")
+        sb_input = st.text_input("Liman Cüzdan No (SB)", value="", placeholder="Örn: S00512849 veya Sicil No girin")
         
     clean_tckn = re.sub(r'\D', '', tckn_input)
     clean_sb = re.sub(r'[^A-Za-z0-9]', '', sb_input).upper()
     
-    # SIFIR VARSAYIM KURALI: TCKN ve Cüzdan No boşsa tüm sistemi kilitle!
     validation_locked = False
     if not clean_tckn or not clean_sb:
-        st.error("🚨 **KATI DENETİM KİLİDİ:** TCKN veya Liman Cüzdan Numarası doğrulanamadı! Personelin kimlik bağı kurulamadığı için hiçbir sertifikaya 'Yeşil Onay' verilmeyecektir.")
+        st.error("🚨 **KATI DENETİM KİLİDİ:** TCKN ve Liman Cüzdan Numarası alanlarının doldurulması zorunludur! Bilgiler tamamlanana kadar evraklar onaylanmaz.")
         validation_locked = True
     else:
         uab_url = f"https://gemiadami.uab.gov.tr/verification/{clean_tckn}/{clean_sb}"
@@ -211,7 +166,7 @@ if uploaded_files:
     st.subheader("📥 Çıktı Dosyaları")
 
     def build_excel_export():
-        template_candidates = ["35-101_template.xlsx", "templates/35-101_template.xlsx", "35-101 Documents check list (1) (1).xlsx"]
+        template_candidates = ["35-101_Seafarers_Documents_Check_List_YASIN_DOSER_V5.xlsx", "35-101_template.xlsx", "templates/35-101_template.xlsx"]
         found_template = next((c for c in template_candidates if os.path.exists(c)), None)
         
         if found_template:
@@ -236,31 +191,25 @@ if uploaded_files:
             
         for r_idx, no_str, en_title, req_ranks, keywords in CERT_MATRIX:
             is_req = rank in req_ranks
-            # KİLİT AKTİFSE VEYA KELİME BULUNAMADIYSA REDDET
             is_found = any(kw in evidence_text for kw in keywords) if not validation_locked else False
-            
             r2 = r_idx + 1
             ws1.cell(r_idx, 1).value = no_str
             ws1.cell(r_idx, 2).value = en_title
-            ws1.cell(r_idx, 2).font = Font(name="Calibri", size=9.5, bold=True)
             
             if is_req:
                 if is_found:
                     ws1.cell(r2, 2).value = "► Mevcut (Evrak Yüklendi)"
-                    ws1.cell(r2, 2).font = Font(name="Calibri", size=8.5, italic=True, color="1F3864")
                     for r_sub in [r_idx, r2]:
                         for c in range(1, rank_col): ws1.cell(r_sub, c).fill = green_fill
                         ws1.cell(r_sub, rank_col).fill = intersect_green
                         ws1.cell(r_sub, rank_col).value = "X"
                 else:
                     ws1.cell(r2, 2).value = "► EKSİK / DOĞRULANMADI!"
-                    ws1.cell(r2, 2).font = Font(name="Calibri", size=9, bold=True, color="FFFFFF")
                     for r_sub in [r_idx, r2]:
                         for c in range(1, rank_col): ws1.cell(r_sub, c).fill = red_fill
                         ws1.cell(r_sub, rank_col).fill = intersect_red
             else:
                 ws1.cell(r2, 2).value = f"► Bu görev ({rank}) için zorunlu değil (N/A)"
-                ws1.cell(r2, 2).font = Font(name="Calibri", size=8.5, italic=True, color="7F7F7F")
 
         ws1.page_setup.orientation = ws1.ORIENTATION_LANDSCAPE
         ws1.page_setup.fitToWidth = 1
@@ -270,6 +219,28 @@ if uploaded_files:
         wb.save(buf)
         return buf.getvalue()
 
+    def build_word_export():
+        doc = docx.Document()
+        doc.add_paragraph("35-102 PRE DESIGNATION CHECK LIST")
+        table = doc.add_table(rows=1, cols=3)
+        
+        def add_check_row(no_str, title_str, is_yes=True, is_na=False):
+            row = table.add_row()
+            row.cells[0].text = no_str
+            row.cells[1].text = title_str
+            if is_na: row.cells[2].text = "N/A ☑"
+            elif is_yes: row.cells[2].text = "Yes ☑"
+            else: row.cells[2].text = "No ☑"
+
+        has_cra = any(kw in evidence_text for kw in ["cra", "endorsement", "bayrak"]) if not validation_locked else False
+        add_check_row("3", "Flag State’s Licence / STCW Endorsement / CRA", is_yes=has_cra)
+        
+        buf = io.BytesIO()
+        doc.save(buf)
+        return buf.getvalue()
+
     c1, c2 = st.columns(2)
     with c1:
-        st.download_button(label=f"📊 35-101 Excel İndir ({crew_name})", data=build_excel_export(), file_name=f"35-101_{crew_name}.xlsx")
+        st.download_button(label=f"📊 35-101 Excel İndir ({crew_name})", data=build_excel_export(), file_name=f"35-101_{crew_name}.xlsx", disabled=validation_locked)
+    with c2:
+        st.download_button(label=f"📝 35-102 Word İndir ({crew_name})", data=build_word_export(), file_name=f"35-102_{crew_name}.docx", disabled=validation_locked)
