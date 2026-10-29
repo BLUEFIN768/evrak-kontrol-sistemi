@@ -1,6 +1,5 @@
 streamlit
 openpyxl
 python-docx
+google-generativeai
 python-dateutil
-requests
-beautifulsoup4
