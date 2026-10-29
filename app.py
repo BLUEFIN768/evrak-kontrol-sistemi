@@ -3,18 +3,14 @@ import datetime
 import time
 import io
 import os
-import json
+import re
 from dateutil.relativedelta import relativedelta
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment
 import docx
-
-try:
-    import google.generativeai as genai
-    AI_AVAILABLE = True
-except ImportError as e:
-    AI_AVAILABLE = False
-    AI_ERROR = str(e)
+import pdfplumber
+import pytesseract
+from PIL import Image
 
 st.set_page_config(page_title="Evrak Kontrol Portalı", page_icon="⚓", layout="wide")
 
@@ -52,12 +48,7 @@ if st.sidebar.button("🚪 Çıkış Yap"):
     st.rerun()
 
 st.title("⚓ Evrak Kontrol & Denetim Portalı")
-st.caption("Yapay Zeka Destekli (Gemini 3.8) & Üç Katmanlı Eşleştirme Motoru")
-
-# =============================================================================
-# AI (GEMINI) BAĞLANTISI
-# =============================================================================
-api_key = st.sidebar.text_input("🔑 Google Gemini API Key", type="password", placeholder="AIzaSy...")
+st.caption("Yerel Metin Madenciliği (Sınırsız & Ücretsiz) & Üç Katmanlı Eşleştirme Motoru")
 
 # =============================================================================
 # KURUMSAL 35-101 MATRİS TANIMLARI
@@ -132,112 +123,119 @@ def locate_template(pattern_str, extension):
 template_excel_path = locate_template("35101", ".xlsx")
 template_word_path = locate_template("35102", ".docx")
 
-def parse_ai_response(response_text):
-    try:
-        start = response_text.find('{')
-        end = response_text.rfind('}') + 1
-        if start != -1 and end != 0:
-            return json.loads(response_text[start:end])
-    except:
-        pass
-    return {}
+# =============================================================================
+# YEREL METİN MADENCİLİĞİ (REGEX & OCR) FONKSİYONLARI
+# =============================================================================
+def extract_text(file_obj, filename):
+    text = ""
+    ext = filename.split('.')[-1].lower()
+    if ext == "pdf":
+        try:
+            with pdfplumber.open(file_obj) as pdf:
+                for page in pdf.pages:
+                    extracted = page.extract_text()
+                    if extracted: text += extracted + "\n"
+        except:
+            pass
+    elif ext in ["jpg", "jpeg", "png"]:
+        try:
+            img = Image.open(file_obj)
+            text = pytesseract.image_to_string(img, lang="eng+tur")
+        except:
+            pass
+    return text
+
+def find_dates(text):
+    date_pattern = r"\b(\d{1,2}[\.\/\-]\d{1,2}[\.\/\-]\d{2,4})\b"
+    matches = re.findall(date_pattern, text)
+    valid_dates = []
+    for d in matches:
+        clean_d = d.replace('/', '.').replace('-', '.')
+        try:
+            parsed = datetime.datetime.strptime(clean_d, "%d.%m.%Y")
+            if 1950 < parsed.year < 2050:
+                valid_dates.append(parsed)
+        except:
+            pass
+    
+    if not valid_dates:
+        if re.search(r"(?i)s[uü]res[iı]z|unl[iı]m[iı]ted|indefinite", text):
+            return "", "Süresiz"
+        return "", ""
+    
+    valid_dates.sort()
+    if len(valid_dates) == 1:
+        return "", valid_dates[0].strftime("%d.%m.%Y")
+    
+    # En eski tarih veriliş, en yeni tarih bitiş kabul edilir.
+    issue_date = valid_dates[0].strftime("%d.%m.%Y")
+    expiry_date = valid_dates[-1].strftime("%d.%m.%Y")
+    return issue_date, expiry_date
+
+def extract_identifiers(text):
+    tc_match = re.search(r"\b([1-9]\d{10})\b", text)
+    sb_match = re.search(r"\b([Ss]\d{6,8})\b", text)
+    pass_match = re.search(r"\b([UuA-Za-z]\d{6,8})\b", text)
+    
+    tc = tc_match.group(1) if tc_match else ""
+    sb = sb_match.group(1).upper() if sb_match else ""
+    passport = pass_match.group(1).upper() if pass_match else ""
+    return tc, sb, passport
 
 # =============================================================================
-# EVRAK YÜKLEME VE YAPAY ZEKA (İÇERİK) ANALİZİ
+# EVRAK YÜKLEME VE ANALİZ
 # =============================================================================
-if not api_key:
-    st.error("🚨 İşleme başlamak için sol menüden API Anahtarınızı giriniz.")
-
 uploaded_files = st.file_uploader(
     "Tüm Evrakları Yükleyin (Pasaport, Medical, Yellow Fever, STCW'ler)",
     type=["pdf", "jpg", "jpeg", "png"],
     accept_multiple_files=True
 )
 
-if uploaded_files and api_key:
-    if not AI_AVAILABLE:
-        st.error(f"🚨 Yapay Zeka kütüphanesi yüklenemedi! Hata: {AI_ERROR}")
-        st.stop()
-
-    genai.configure(api_key=api_key)
-    
-    # HATA MESAJINDA İSTENEN SPESİFİK MODEL
-    try:
-        model = genai.GenerativeModel('gemini-3.8-flash')
-    except Exception as e:
-        st.error(f"⚠️ Model başlatılamadı: {str(e)}")
-        st.stop()
-    
-    crew_name, crew_surname, tckn_val, sb_val, pass_val = "", "", "", "", ""
+if uploaded_files:
+    crew_name, crew_surname = "", ""
+    tckn_val, sb_val, pass_val = "", "", ""
     all_certs = []
     
-    prompt = """
-    Aşağıdaki JSON formatını kullanarak bu denizcilik evrakındaki bilgileri çıkar.
-    SADECE JSON YAZ, başka hiçbir açıklama ekleme.
-    {
-      "ad": "Personel Adı",
-      "soyad": "Personel Soyadı",
-      "tc": "TC Kimlik No",
-      "pasaport": "Pasaport No",
-      "cuzdan": "Liman Cüzdanı No",
-      "belgeler": [
-        {
-          "isim": "Eğitim veya Belgenin Tam Adı (Örn: Pasaport, Gemiadamı Cüzdanı, Temel İlkyardım, STCW Yangın Önleme vb.)",
-          "no": "Belge Numarası",
-          "verilis": "DD.MM.YYYY",
-          "bitis": "DD.MM.YYYY"
-        }
-      ]
-    }
-    Bulamadığın alanları boş bırak ("").
-    """
-    
-    progress_text = "Yapay Zeka Evrakları Okuyor (Model: gemini-3.8-flash)..."
+    progress_text = "Yerel Sistem Evrakları Okuyor (İnternet Gerektirmez)..."
     my_bar = st.progress(0, text=progress_text)
     
     for idx, f in enumerate(uploaded_files):
-        fname = f.name.lower()
+        fname = f.name
         content = f.read()
         f.seek(0)
         
-        mime_type = "application/pdf"
-        if fname.endswith((".jpg", ".jpeg")): mime_type = "image/jpeg"
-        elif fname.endswith(".png"): mime_type = "image/png"
-            
-        part = {"mime_type": mime_type, "data": content}
+        # 1. Metni Çıkar
+        raw_text = extract_text(io.BytesIO(content), fname)
         
-        try:
-            response = model.generate_content([prompt, part])
-            data = parse_ai_response(response.text)
-            
-            if data.get("ad") and not crew_name: crew_name = str(data.get("ad")).upper()
-            if data.get("soyad") and not crew_surname: crew_surname = str(data.get("soyad")).upper()
-            if data.get("tc") and not tckn_val: tckn_val = str(data.get("tc")).upper()
-            if data.get("pasaport") and not pass_val: pass_val = str(data.get("pasaport")).upper()
-            if data.get("cuzdan") and not sb_val: sb_val = str(data.get("cuzdan")).upper()
-            
-            certs = data.get("belgeler", [])
-            for c in certs:
-                c["dosya_adi"] = fname
-                all_certs.append(c)
-                
-        except Exception as e:
-            st.error(f"🚨 OKUMA HATASI ({f.name}): Hata: {str(e)}")
-            
-        time.sleep(3.5)
-        my_bar.progress((idx + 1) / len(uploaded_files), text=f"{f.name} okundu.")
+        # 2. TC, Cüzdan, Pasaport yakala
+        tc, sb, pasp = extract_identifiers(raw_text)
+        if tc and not tckn_val: tckn_val = tc
+        if sb and not sb_val: sb_val = sb
+        if pasp and not pass_val: pass_val = pasp
+        
+        # 3. Tarihleri yakala
+        issue_d, exp_d = find_dates(raw_text)
+        
+        # 4. Listeye ekle (İsim olarak dosya adını baz alıyoruz)
+        all_certs.append({
+            "dosya_adi": fname,
+            "verilis": issue_d,
+            "bitis": exp_d
+        })
+        
+        time.sleep(0.5) # İşlem hızı animasyonu
+        my_bar.progress((idx + 1) / len(uploaded_files), text=f"{fname} okundu.")
         
     my_bar.empty()
 
     if all_certs:
         st.subheader("🗓️ Okunan Evraklar ve Tarihler")
-        st.caption("Yapay zekanın evrakların içinden çektiği veriler aşağıdadır. Hatalı okunan bir tarih varsa, Word/Excel'e geçmeden görebilirsiniz.")
+        st.caption("Veriler yerel sistem tarafından belgenin içinden Regex ile çıkarılmıştır.")
         
         display_data = []
         for c in all_certs:
             display_data.append({
                 "Dosya Adı": c.get("dosya_adi", ""),
-                "Belge / Eğitim": c.get("isim", ""),
                 "Veriliş": c.get("verilis", ""),
                 "Bitiş": c.get("bitis", "")
             })
@@ -247,8 +245,8 @@ if uploaded_files and api_key:
     
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        full_name_input = f"{crew_name} {crew_surname}".strip()
-        final_crew_name = st.text_input("Personel Adı Soyadı", value=full_name_input)
+        # İsim bulmayı bot yapmadığı için doğrudan dosyadan manuel kontrol istenebilir
+        final_crew_name = st.text_input("Personel Adı Soyadı", value="", placeholder="İsim Soyisim Girin")
     with col2:
         label_id = "T.C. Kimlik No" if nationality == "Turkish" else f"National ID ({nationality})"
         final_tckn = st.text_input(label_id, value=tckn_val)
@@ -259,7 +257,7 @@ if uploaded_files and api_key:
         
     if nationality == "Turkish":
         if not final_tckn or not final_sb or len(final_crew_name.split()) < 2:
-            st.warning("⚠️ Kutularda eksik bilgiler var (Elle doldurabilirsiniz). Sistem kilitsizdir, onay size aittir.")
+            st.warning("⚠️ Kutularda eksik bilgiler var. Sistem kilitsizdir, tamamlayıp devam edebilirsiniz.")
         else:
             st.success(f"✅ Veriler Onaylandı. Asgari Kontrat Şartı: {required_contract_months} Ay.")
             uab_url = f"https://gemiadami.uab.gov.tr/verification/{final_tckn.strip()}/{final_sb.strip()}"
@@ -270,7 +268,7 @@ if uploaded_files and api_key:
     st.divider()
 
     # =========================================================================
-    # EXCEL / WORD OLUŞTURMA (ÜÇ KATMANLI EŞLEŞTİRME)
+    # EXCEL / WORD OLUŞTURMA (KATMANLI EŞLEŞTİRME)
     # =========================================================================
     def build_excel_from_template():
         if not template_excel_path or not os.path.exists(template_excel_path):
@@ -313,40 +311,21 @@ if uploaded_files and api_key:
                 is_found = False
 
                 for cert in all_certs:
-                    c_name = str(cert.get("isim", "")).lower()
-                    if any(kw in c_name for kw in keywords):
+                    f_name = str(cert.get("dosya_adi", "")).lower()
+                    if any(kw in f_name for kw in keywords):
                         matching_cert = cert
                         is_found = True
                         break
-                
-                if not is_found:
-                    for cert in all_certs:
-                        f_name = str(cert.get("dosya_adi", "")).lower()
-                        if any(kw in f_name for kw in keywords):
-                            matching_cert = cert
-                            is_found = True
-                            break
-
-                if not is_found:
-                    for f in uploaded_files:
-                        f_name = f.name.lower()
-                        if any(kw in f_name for kw in keywords):
-                            is_found = True
-                            matching_cert = {"no": "Orijinalinden Teyitli", "bitis": "Manuel Kontrol", "verilis": ""}
-                            break
 
                 if is_found:
-                    doc_no_val = str(matching_cert.get("no", "Bulunamadı"))
-                    if "seaman" in en_title.lower() and final_sb: doc_no_val = final_sb
-                    if "pass" in en_title.lower() and final_pass: doc_no_val = final_pass
-                    if doc_no_val == "Bulunamadı" or not doc_no_val: doc_no_val = "Orijinalinden Teyitli"
+                    doc_no_val = final_sb if "seaman" in en_title.lower() else (final_pass if "pass" in en_title.lower() else "Orijinalinden Teyitli")
 
                     expiry_str = str(matching_cert.get("bitis", "")).replace("/", ".").replace("-", ".")
                     if "suresiz" in expiry_str.lower() or "süresiz" in expiry_str.lower():
                         expiry_str = "Süresiz"
 
                     remaining_months = 60
-                    if expiry_str and expiry_str != "Süresiz" and expiry_str != "Manuel Kontrol" and len(expiry_str) >= 8:
+                    if expiry_str and expiry_str != "Süresiz" and len(expiry_str) >= 8:
                         try:
                             exp_date = datetime.datetime.strptime(expiry_str[-10:], "%d.%m.%Y").date()
                             remaining_months = (exp_date.year - join_date.year) * 12 + (exp_date.month - join_date.month)
@@ -428,9 +407,8 @@ if uploaded_files and api_key:
 
         has_cra = False
         for cert in all_certs:
-            c_name = str(cert.get("isim", "")).lower()
             f_name = str(cert.get("dosya_adi", "")).lower()
-            if "endorsement" in c_name or "cra" in c_name or "endorsement" in f_name or "cra" in f_name:
+            if "endorsement" in f_name or "cra" in f_name:
                 has_cra = True
                 break
 
@@ -460,6 +438,6 @@ if uploaded_files and api_key:
 
     c1, c2 = st.columns(2)
     with c1:
-        st.download_button("📊 35-101 Excel İndir", build_excel_from_template(), f"35-101_{final_crew_name}.xlsx", disabled=False)
+        st.download_button("📊 35-101 Excel İndir", build_excel_from_template(), f"35-101.xlsx", disabled=False)
     with c2:
-        st.download_button("📝 35-102 Word İndir", build_word_from_template(), f"35-102_{final_crew_name}.docx", disabled=False)
+        st.download_button("📝 35-102 Word İndir", build_word_from_template(), f"35-102.docx", disabled=False)
