@@ -135,7 +135,7 @@ template_excel_path = locate_template("35101", ".xlsx")
 template_word_path = locate_template("35102", ".docx")
 
 # =============================================================================
-# HEDEFLİ VERİ AYIKLAMA MOTORU (SADECE PASAPORT VE SEAMAN BOOK)
+# HEDEFLİ VERİ AYIKLAMA MOTORU
 # =============================================================================
 def is_passport_file(fname):
     f = fname.lower()
@@ -176,7 +176,79 @@ def format_seaman_number(raw_text):
         return "S" + m_dig.group(1)
     return ""
 
-BLACKLIST_WORDS = {"BABA", "ANA", "ADLI", "SICIL", "SEAMAN", "SEAMANS", "BOOK", "PASSPORT", "PASAPORT", "TURKEY", "REPUBLIC", "CUMHURIYET", "BELGE", "IMZA", "HOLDER", "SIGNATURE", "TÜRÜ", "TYPE", "VEREN", "MAKAM"}
+HEADER_TOKENS = {
+    "SOYADI", "SURNAME", "SURMAE", "SURNAM",
+    "ADI", "NAME", "MAME", "GIVEN", "FIRST",
+    "TÜRÜ", "TYPE", "KODU", "CODE",
+    "PASAPORT", "PASSPORT", "CINSIYET", "SEX",
+    "UYRUĞU", "UYRUK", "NATIONALITY",
+    "KİMLİK", "KIMLIK", "PERS", "ID", "NO", "DOĞUM", "BIRTH",
+    "TÜRKİYE", "REPUBLIC", "CUMHURİYET", "TURKEY",
+    "VEREN", "MAKAM", "ISSUED", "DATE", "TARİHİ", "TARIHI",
+    "HAMİLİNİN", "IMZASI", "SIGNATURE", "HOLDER",
+    "BABA", "ANA", "ADLI", "SICIL", "SEAMAN", "SEAMANS", "BOOK"
+}
+
+def is_header_line(line):
+    words = re.findall(r'[a-zA-ZÇĞİÖŞÜçğıöşü]+', line.upper())
+    if not words:
+        return True
+    matching = [w for w in words if any(ht in w or w in ht for ht in HEADER_TOKENS)]
+    return len(matching) / len(words) >= 0.5
+
+def clean_alpha_name(raw_s):
+    clean = "".join([c for c in raw_s if c.isalpha() or c.isspace()])
+    cyr_map = {'А': 'A', 'В': 'B', 'Е': 'E', 'К': 'K', 'М': 'M', 'Н': 'H', 'О': 'O', 'Р': 'P', 'С': 'C', 'Т': 'T', 'Х': 'X'}
+    res = "".join([cyr_map.get(c, c) for c in clean])
+    return " ".join(res.split()).upper()
+
+def extract_name_from_passport_text(text):
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    for l in lines:
+        cl = l.replace(" ", "").upper()
+        m_mrz = re.search(r'P[<C\(\[\{][A-Z0-9]{3}([A-Z]+)<<([A-Z<]+)', cl)
+        if m_mrz:
+            sur = m_mrz.group(1).replace("<", "").strip()
+            givens = [p for p in m_mrz.group(2).split("<") if p]
+            giv = " ".join(givens).strip()
+            if len(sur) >= 2 and len(giv) >= 2 and sur not in HEADER_TOKENS:
+                return f"{clean_alpha_name(giv)} {clean_alpha_name(sur)}"
+                
+    surname = ""
+    given_name = ""
+    for idx, l in enumerate(lines):
+        l_up = l.upper()
+        if ("SOYAD" in l_up or "SURNAME" in l_up or "SURMAE" in l_up) and not surname:
+            for j in range(idx + 1, min(idx + 5, len(lines))):
+                candidate = lines[j].strip()
+                if candidate and not is_header_line(candidate):
+                    cand_c = clean_alpha_name(candidate)
+                    if len(cand_c) >= 2 and cand_c not in HEADER_TOKENS:
+                        surname = cand_c.split()[0]
+                        break
+                        
+        if ("ADI" in l_up or "NAME" in l_up or "MAME" in l_up) and not given_name:
+            if not any(k in l_up for k in ["SOYAD", "BABA", "ANA"]):
+                for j in range(idx + 1, min(idx + 5, len(lines))):
+                    candidate = lines[j].strip()
+                    if candidate and not is_header_line(candidate):
+                        cand_c = clean_alpha_name(candidate)
+                        if len(cand_c) >= 2 and cand_c not in HEADER_TOKENS:
+                            given_name = cand_c
+                            break
+
+    if given_name and surname and given_name != surname:
+        return f"{given_name} {surname}"
+    return ""
+
+def extract_name_from_seaman_text(text):
+    clean = text.replace(" ", "").upper()
+    m_sb_mrz = re.search(r'G[<C][A-Z0-9]{3}([A-Z<]+)', clean)
+    if m_sb_mrz:
+        parts = [clean_alpha_name(p) for p in m_sb_mrz.group(1).split("<") if len(p) >= 2 and clean_alpha_name(p) not in HEADER_TOKENS]
+        if len(parts) >= 2:
+            return " ".join(parts)
+    return extract_name_from_passport_text(text)
 
 def extract_data(files):
     tckn, sb, pass_no, text_blob = "", "", "", ""
@@ -192,7 +264,6 @@ def extract_data(files):
             is_pass = is_passport_file(fname)
             is_sb = is_seaman_file(fname)
             
-            # SADECE PASAPORT VEYA SEAMAN BOOK DOSYALARINDA OCR VE DERİN ANALİZ YAP
             if is_pass or is_sb:
                 if fname.endswith(".pdf"):
                     try:
@@ -200,7 +271,6 @@ def extract_data(files):
                         for page in reader.pages:
                             text += (page.extract_text() or "") + "\n"
                         
-                        # CamScanner yazısı olsa dahi şartsız OCR çalıştır
                         if OCR_AVAILABLE:
                             for page in reader.pages:
                                 for img_obj in page.images:
@@ -226,7 +296,6 @@ def extract_data(files):
                     except Exception:
                         pass
             else:
-                # DİĞER EVRAKLARDA SADECE SERTİFİKA EŞLEŞMESİ İÇİN METİN AL (KİMLİK/İSİM ARAMASI ASLA YAPILMAZ)
                 if fname.endswith(".pdf"):
                     try:
                         reader = pypdf.PdfReader(io.BytesIO(content))
@@ -237,107 +306,49 @@ def extract_data(files):
 
             text_blob += f" {fname} {text.lower()} "
             
-            # =================================================================
-            # KURAL 1: PASAPORT DOSYASINDAN AD, SOYAD, TCKN, PASAPORT NO
-            # =================================================================
-            if is_pass:
-                # 1. Pasaport No
-                if not pass_no:
-                    m_p = re.search(r'([UVuv]\d{8})', text)
-                    if m_p:
-                        pass_no = m_p.group(1).upper()
+            # Pasaport Numarası
+            if is_pass and not pass_no:
+                m_p = re.search(r'([UVuv]\d{8})', text)
+                if m_p:
+                    pass_no = m_p.group(1).upper()
+                else:
+                    m_mrz_p = re.search(r'([UVuv][0-9]{8})\d[A-Z]{3}', text.replace(" ", ""))
+                    if m_mrz_p:
+                        pass_no = m_mrz_p.group(1).upper()
+
+            # TCKN
+            if (is_pass or is_sb) and not tckn and nationality == "Turkish":
+                clean_lines = [l.replace(" ", "") for l in text.splitlines()]
+                for cl in clean_lines:
+                    m_tc_mrz = re.search(r'\d{6}\d[MF<]\d{6}\d([1-9]\d{10})', cl)
+                    if m_tc_mrz:
+                        tckn = m_tc_mrz.group(1)
+                        break
+                if not tckn:
+                    m_tc = re.search(r'(?:K[İI]ML[İI]K|ID)\s*(?:NO)?[^\d]*([1-9]\d{10})', text, re.IGNORECASE)
+                    if m_tc:
+                        tckn = m_tc.group(1)
                     else:
-                        m_mrz_p = re.search(r'([UVuv][0-9]{8})\d[A-Z]{3}', text.replace(" ", ""))
-                        if m_mrz_p:
-                            pass_no = m_mrz_p.group(1).upper()
+                        m_tc2 = re.search(r'(?<!\d)([1-9]\d{10})(?!\d)', text)
+                        if m_tc2:
+                            tckn = m_tc2.group(1)
 
-                # 2. TCKN (Pasaporttan)
-                if not tckn and nationality == "Turkish":
-                    clean_lines = [l.replace(" ", "") for l in text.splitlines()]
-                    for cl in clean_lines:
-                        m_tc_mrz = re.search(r'\d{6}\d[MF<]\d{6}\d([1-9]\d{10})', cl)
-                        if m_tc_mrz:
-                            tckn = m_tc_mrz.group(1)
-                            break
-                    if not tckn:
-                        m_tc = re.search(r'(?:K[İI]ML[İI]K|ID)\s*(?:NO)?[^\d]*([1-9]\d{10})', text, re.IGNORECASE)
-                        if m_tc:
-                            tckn = m_tc.group(1)
-                        else:
-                            m_tc2 = re.search(r'(?<!\d)([1-9]\d{10})(?!\d)', text)
-                            if m_tc2:
-                                tckn = m_tc2.group(1)
-
-                # 3. Ad Soyad (SADECE Pasaporttaki SOYADI / SURNAME ve ADI / NAME etiketleri veya MRZ)
-                if not best_name:
-                    # MRZ Kontrolü: P<TURKAHRIMAN<<AHMET<TAHA...
-                    for line in text.upper().splitlines():
-                        l_clean = line.replace(" ", "")
-                        m_mrz_pass = re.search(r'P[<C]TUR([A-Z]+)<<([A-Z<]+)', l_clean)
-                        if m_mrz_pass:
-                            sur = m_mrz_pass.group(1).replace("<", "").strip()
-                            given_parts = [p for p in m_mrz_pass.group(2).split("<") if p]
-                            given = " ".join(given_parts).strip()
-                            if len(sur) >= 2 and len(given) >= 2 and sur not in BLACKLIST_WORDS:
-                                best_name = f"{given} {sur}"
-                                break
-
-                    # Görsel Etiket Kontrolü: SOYADI / SURNAME ve ADI / NAME
-                    if not best_name:
-                        sur_val, nam_val = "", ""
-                        lines = [l.strip() for l in text.splitlines() if l.strip()]
-                        for idx, l in enumerate(lines):
-                            l_up = l.upper()
-                            if ("SOYADI" in l_up or "SURNAME" in l_up) and not sur_val:
-                                after = re.sub(r'^.*(?:SOYADI|SURNAME)[^a-zA-ZÇĞİÖŞÜ]*', '', l).strip()
-                                if len(after) >= 2 and after.upper() not in BLACKLIST_WORDS:
-                                    sur_val = after.split()[0]
-                                elif idx + 1 < len(lines):
-                                    nxt = lines[idx+1].strip()
-                                    if len(nxt) >= 2 and nxt.upper() not in BLACKLIST_WORDS and "ADI" not in nxt.upper():
-                                        sur_val = nxt.split()[0]
-                                        
-                            if ("ADI" in l_up or "NAME" in l_up) and not nam_val:
-                                if "SOYADI" not in l_up and "BABA" not in l_up and "ANA" not in l_up:
-                                    after = re.sub(r'^.*(?:ADI|NAME)[^a-zA-ZÇĞİÖŞÜ]*', '', l).strip()
-                                    if len(after) >= 2 and after.upper() not in BLACKLIST_WORDS:
-                                        nam_val = after
-                                    elif idx + 1 < len(lines):
-                                        nxt = lines[idx+1].strip()
-                                        if len(nxt) >= 2 and nxt.upper() not in BLACKLIST_WORDS and not any(k in nxt.upper() for k in ["PASAPORT", "SEX", "UYRUK"]):
-                                            nam_val = nxt
-                                            
-                        if sur_val and nam_val and sur_val != nam_val:
-                            best_name = f"{nam_val} {sur_val}"
-
-            # =================================================================
-            # KURAL 2: LİMAN CÜZDANI DOSYASINDAN S İLE BAŞLAYAN NO
-            # =================================================================
-            if is_sb:
+            # Liman Cüzdan Numarası
+            if is_sb and not sb:
+                clean_lines = [l.replace(" ", "") for l in text.splitlines()]
+                for cl in clean_lines:
+                    m_mrz_sb = re.match(r'^([S58]\d{8})', cl, re.IGNORECASE)
+                    if m_mrz_sb:
+                        sb = "S" + m_mrz_sb.group(1)[1:9]
+                        break
                 if not sb:
-                    clean_lines = [l.replace(" ", "") for l in text.splitlines()]
-                    for cl in clean_lines:
-                        m_mrz_sb = re.match(r'^([S58]\d{8})', cl, re.IGNORECASE)
-                        if m_mrz_sb:
-                            sb = "S" + m_mrz_sb.group(1)[1:9]
-                            break
-                    if not sb:
-                        sb = format_seaman_number(text)
+                    sb = format_seaman_number(text)
 
-                # Pasaportta isim okunamadıysa Liman Cüzdanı MRZ'sine bak (G<TUR...)
-                if not best_name:
-                    clean_all_sb = text.upper().replace(" ", "").replace("\n", "")
-                    m_sb_mrz = re.search(r'G<TUR([A-Z<]+)', clean_all_sb)
-                    if m_sb_mrz:
-                        parts = [p for p in m_sb_mrz.group(1).split("<") if p and len(p) >= 2 and p not in BLACKLIST_WORDS]
-                        if len(parts) >= 2:
-                            best_name = f"{parts[0]} {parts[1]}"
-
-                # Pasaportta TCKN yoksa cüzdandan al
-                if not tckn and nationality == "Turkish":
-                    m_tc_sb = re.search(r'(?<!\d)([1-9]\d{10})(?!\d)', text)
-                    if m_tc_sb:
-                        tckn = m_tc_sb.group(1)
+            # İsim Çıkarımı
+            if is_pass and not best_name:
+                best_name = extract_name_from_passport_text(text)
+            elif is_sb and not best_name:
+                best_name = extract_name_from_seaman_text(text)
 
     return best_name, tckn, sb, pass_no, text_blob
 
@@ -354,7 +365,7 @@ if uploaded_files:
     crew_name_ext, tckn_ext, sb_ext, pass_ext, evidence_text = extract_data(uploaded_files)
     
     st.subheader("📋 Çıkarılan / Teyit Edilen Bilgiler")
-    st.caption("Veriler belgelerden çekilmiştir. Gerekirse elle kontrol edebilir veya düzeltebilirsiniz.")
+    st.caption("Veriler belgelerden çekilmiştir. Gerekirse kontrol edebilir veya tamamlayabilirsiniz.")
     
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -375,14 +386,14 @@ if uploaded_files:
         
         errors = []
         clean_name = crew_name.strip()
-        has_invalid_word = any(bw in clean_name.upper().split() for bw in BLACKLIST_WORDS)
+        has_invalid_word = any(bw in clean_name.upper().split() for bw in HEADER_TOKENS)
         
         if not clean_name or len(clean_name.split()) < 2 or has_invalid_word:
-            errors.append("Personel Adı Soyadı pasaporttan doğru okunamadı. Lütfen kutuya geçerli Ad ve Soyad giriniz.")
+            errors.append("Personel Adı Soyadı pasaporttan doğru okunamadı. Lütfen kutuya gerçek Ad ve Soyad giriniz.")
         if not is_tckn_valid:
             errors.append("11 haneli geçerli T.C. Kimlik Numarası eksik veya hatalı.")
         if not is_sb_valid:
-            errors.append("Liman Cüzdan Numarası 'S' ile başlamalı ve geçerli formatta olmalıdır (Örn: S00392038).")
+            errors.append("Liman Cüzdan Numarası 'S' ile başlamalı ve geçerli formatta olmalıdır (Örn: S00434304).")
         if not pass_val.strip():
             errors.append("Pasaport Numarası eksik.")
             
