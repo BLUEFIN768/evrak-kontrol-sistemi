@@ -12,8 +12,9 @@ import docx
 try:
     import google.generativeai as genai
     AI_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     AI_AVAILABLE = False
+    AI_ERROR = str(e)
 
 st.set_page_config(page_title="Evrak Kontrol Portalı", page_icon="⚓", layout="wide")
 
@@ -153,7 +154,11 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
-if uploaded_files and api_key and AI_AVAILABLE:
+if uploaded_files and api_key:
+    if not AI_AVAILABLE:
+        st.error(f"🚨 KRİTİK HATA: Yapay Zeka kütüphanesi (google-generativeai) sunucuya yüklenemedi!\n\nHata Detayı: {AI_ERROR}\n\nÇözüm: Lütfen 'requirements.txt' dosyanızı kontrol edip, sağ alttaki siyah menüden 'Clear cache and deploy' seçeneğine tıklayın.")
+        st.stop()
+
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
     
@@ -215,7 +220,6 @@ if uploaded_files and api_key and AI_AVAILABLE:
         except Exception as e:
             pass
             
-        # Kota aşımını önlemek için ufak bir bekleme
         time.sleep(3.5)
         my_bar.progress((idx + 1) / len(uploaded_files), text=f"{f.name} okundu.")
         
@@ -242,7 +246,8 @@ if uploaded_files and api_key and AI_AVAILABLE:
         else:
             st.success(f"✅ Veriler Onaylandı. Asgari Kontrat Şartı: {required_contract_months} Ay.")
             uab_url = f"[https://gemiadami.uab.gov.tr/verification/](https://gemiadami.uab.gov.tr/verification/){final_tckn.strip()}/{final_sb.strip()}"
-            st.markdown(f'<a href="{uab_url}" target="_blank" style="background-color: #0056b3; color: white; padding: 10px 20px; border-radius: 4px; text-decoration: none; font-weight: bold; display: inline-block; margin-bottom: 10px;">UAB Portalı Doğrulama ↗</a>', unsafe_allow_html=True)
+            # URL YÖNLENDİRME DÜZELTİLDİ: st.link_button kullanılarak yeni sekmede sorunsuz açılması sağlandı
+            st.link_button("UAB Portalı Doğrulama ↗", uab_url, type="primary")
     else:
         st.success(f"✅ Yabancı uyruklu personel işlemleri devam edebilir.")
 
@@ -289,7 +294,6 @@ if uploaded_files and api_key and AI_AVAILABLE:
             
             if is_req:
                 matching_cert = None
-                # Yapay zekanın bulduğu sertifika listesinde, bizim aradığımız anahtar kelime var mı?
                 for cert in all_certs:
                     c_type = str(cert.get("tur", "")).lower()
                     if any(kw in c_type for kw in keywords):
@@ -310,13 +314,12 @@ if uploaded_files and api_key and AI_AVAILABLE:
                     
                     if expiry_str and expiry_str.lower() != "süresiz" and len(expiry_str) >= 8:
                         try:
-                            # Sadece son 10 karakteri al (Örn: 22.07.2024)
                             exp_date = datetime.datetime.strptime(expiry_str[-10:], "%d.%m.%Y").date()
                             remaining_months = (exp_date.year - join_date.year) * 12 + (exp_date.month - join_date.month)
                         except:
                             pass
                     elif expiry_str.lower() == "süresiz" or "medical" not in en_title.lower():
-                        remaining_months = 100 # Süresiz evrak
+                        remaining_months = 100 
                         expiry_str = "Süresiz"
 
                     if remaining_months < required_contract_months:
