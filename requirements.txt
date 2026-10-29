@@ -3,6 +3,6 @@ openpyxl
 python-docx
 pypdf
 pdf2image
-pillow
-pytesseract
+Pillow
 python-dateutil
+google-generativeai
