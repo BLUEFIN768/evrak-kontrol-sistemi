@@ -3,34 +3,24 @@ import datetime
 import io
 import os
 import re
-import numpy as np
 import pypdf
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment
 import docx
 from PIL import Image
 
-# 1. OCR Motorlarını Başlatma (EasyOCR Öncelikli, Tesseract Yedek)
-try:
-    import easyocr
-    # Türkçe ve İngilizce modellerini belleğe al
-    @st.cache_resource
-    def load_easyocr_reader():
-        return easyocr.Reader(['tr', 'en'], gpu=False)
-    reader_ocr = load_easyocr_reader()
-    EASYOCR_READY = True
-except Exception:
-    EASYOCR_READY = False
-
 try:
     import pytesseract
     from pdf2image import convert_from_bytes
-    TESSERACT_READY = True
-except Exception:
-    TESSERACT_READY = False
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
 
 st.set_page_config(page_title="Evrak Kontrol Portalı", page_icon="⚓", layout="wide")
 
+# =============================================================================
+# KULLANICI GİRİŞİ & OTURUM YÖNETİMİ
+# =============================================================================
 def check_password():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
@@ -56,14 +46,17 @@ def check_password():
 if not check_password():
     st.stop()
 
-st.sidebar.markdown("🔒 **Güvenli Oturum:** Aktif (KVKK Uyumlu)")
+st.sidebar.markdown("🔒 **Güvenli Oturum:** Aktif")
 if st.sidebar.button("🚪 Çıkış Yap"):
     st.session_state["authenticated"] = False
     st.rerun()
 
 st.title("⚓ Evrak Kontrol & Denetim Portalı")
-st.caption("Yerel Derin Öğrenme OCR & Orijinal Şablon Motoru (35-101 / 35-102)")
+st.caption("Otonom Belge Denetimi & Kurumsal 35-101 / 35-102 Form Doldurma Motoru")
 
+# =============================================================================
+# 35-101 ŞABLON MATRİS TANIMLARI
+# =============================================================================
 RANKS_MAP = {
     "Master": 6, "Chief officer": 7, "2 nd Officer": 8, "3 rd Officer": 9,
     "Chief Engineer": 10, "2 nd Engineer": 11, "3rd Engineer": 12, "Electrician": 13,
@@ -93,15 +86,67 @@ CERT_MATRIX = [
     (82, "5", "Endorsement", OFFICER_RANKS + ["Cadet"], ["cra", "endorsement", "bayrak"])
 ]
 
+# =============================================================================
+# SOL MENÜ (SIDEBAR): BOŞ BAŞLANGIÇLI VE ZORUNLU PARAMETRELER
+# =============================================================================
 st.sidebar.header("🚢 Gemi ve Atama Parametreleri")
-vessel_name = st.sidebar.text_input("Gemi Adı", value="Optimus S")
-vessel_flag = st.sidebar.selectbox("Gemi Bayrağı", ["MALTA", "MARSHALL ISLANDS", "PANAMA", "LIBERIA", "TURKIYE"])
-ecdis_model = st.sidebar.text_input("Gemideki ECDIS Modeli", value="")
-rank = st.sidebar.selectbox("Atanan Rütbe", options=ALL_RANKS, index=10) # Varsayılan O/S
-rank_col = RANKS_MAP.get(rank, 17)
-is_officer = rank in OFFICER_RANKS  
-join_date = st.sidebar.date_input("Katılış Tarihi", datetime.date.today())
 
+vessel_name = st.sidebar.text_input(
+    "Vessel Name *",
+    value="",
+    placeholder="Gemi adını giriniz..."
+).strip()
+
+flag_options = ["MALTA", "MARSHALL ISLANDS", "PANAMA", "LIBERIA", "TURKIYE"]
+vessel_flag = st.sidebar.selectbox(
+    "Vessel Flag",
+    options=flag_options,
+    index=None,
+    placeholder="Bayrak seçiniz..."
+)
+
+ecdis_type = st.sidebar.text_input(
+    "ECDIS Type",
+    value="",
+    placeholder="ECDIS modelini giriniz..."
+).strip()
+
+rank = st.sidebar.selectbox(
+    "Rank *",
+    options=ALL_RANKS,
+    index=None,
+    placeholder="Rütbe seçiniz..."
+)
+
+nationality_options = ["Turkish", "Georgian", "Egyptian", "Azerbaijan", "Indonesian"]
+nationality = st.sidebar.selectbox(
+    "Nationality *",
+    options=nationality_options,
+    index=None,
+    placeholder="Uyruk seçiniz..."
+)
+
+join_date = st.sidebar.date_input("Sign-On Date", datetime.date.today())
+
+# Zorunlu alan kontrolü
+missing_fields = []
+if not vessel_name:
+    missing_fields.append("Vessel Name")
+if not rank:
+    missing_fields.append("Rank")
+if not nationality:
+    missing_fields.append("Nationality")
+
+if missing_fields:
+    st.info(f"👉 Devam etmek için sol menüdeki zorunlu alanları doldurunuz: **{', '.join(missing_fields)}**")
+    st.stop()
+
+rank_col = RANKS_MAP.get(rank, 17)
+is_officer = rank in OFFICER_RANKS
+
+# =============================================================================
+# VERİ AYIKLAMA & OCR FONKSİYONLARI
+# =============================================================================
 def clean_sb(raw_val):
     val = re.sub(r'[^a-zA-Z0-9]', '', raw_val).upper()
     val = val.replace('5', 'S', 1).replace('8', 'S', 1).replace('$', 'S', 1)
@@ -109,27 +154,23 @@ def clean_sb(raw_val):
         val = val.replace('S', 'S00', 1)
     return val
 
-def run_ocr_on_image(pil_img):
-    txt = ""
-    if EASYOCR_READY:
+def run_ocr(pil_img):
+    if not OCR_AVAILABLE:
+        return ""
+    try:
+        gray = pil_img.convert('L')
+        return pytesseract.image_to_string(gray, lang="tur+eng")
+    except Exception:
         try:
-            np_img = np.array(pil_img)
-            results = reader_ocr.readtext(np_img, detail=0)
-            txt = " ".join(results)
+            return pytesseract.image_to_string(pil_img, lang="eng")
         except Exception:
-            pass
-    if len(txt.strip()) < 10 and TESSERACT_READY:
-        try:
-            txt = pytesseract.image_to_string(pil_img, lang="tur+eng")
-        except Exception:
-            pass
-    return txt
+            return ""
 
 def extract_data(files):
     tckn, sb, pass_no, text_blob = "", "", "", ""
     best_name = ""
     
-    with st.spinner("Evraklar yerel derin öğrenme motoruyla taranıyor..."):
+    with st.spinner("Evraklar taranıyor..."):
         for f in files:
             text = ""
             content = f.read()
@@ -155,24 +196,21 @@ def extract_data(files):
                     for page in reader.pages:
                         text += (page.extract_text() or "") + " "
                         
-                    # Dijital metin yoksa sayfadaki gömülü resimleri tara
-                    if len(text.strip()) < 50:
+                    if len(text.strip()) < 40 and OCR_AVAILABLE:
                         for page in reader.pages:
                             for img_obj in page.images:
                                 try:
                                     pil_img = Image.open(io.BytesIO(img_obj.data))
-                                    text += run_ocr_on_image(pil_img) + " "
+                                    text += run_ocr(pil_img) + " "
                                 except Exception:
                                     pass
-                                    
-                    # Hâlâ yetersizse pdf2image ile render al
-                    if len(text.strip()) < 50 and TESSERACT_READY:
-                        try:
-                            imgs = convert_from_bytes(content, first_page=1, last_page=1, dpi=300)
-                            if imgs:
-                                text += run_ocr_on_image(imgs[0]) + " "
-                        except Exception:
-                            pass
+                        if len(text.strip()) < 40:
+                            try:
+                                imgs = convert_from_bytes(content, first_page=1, last_page=1, dpi=200)
+                                if imgs:
+                                    text += run_ocr(imgs[0]) + " "
+                            except Exception:
+                                pass
                 except Exception:
                     pass
                 
@@ -180,38 +218,38 @@ def extract_data(files):
             elif fname.endswith((".jpg", ".jpeg", ".png")):
                 try:
                     pil_img = Image.open(io.BytesIO(content))
-                    text += run_ocr_on_image(pil_img) + " "
+                    text += run_ocr(pil_img) + " "
                 except Exception:
                     pass
                 
             text_blob += f" {fname} {text.lower()} "
             clean_search = text.replace("<", " ").replace("\n", " ")
             
-            # TCKN Yakalama
+            # TCKN (Sadece 11 haneli kimlik)
             if not tckn:
                 m_tc = re.search(r'(?<!\d)([1-9]\d{10})(?!\d)', clean_search)
                 if m_tc:
                     tckn = m_tc.group(1)
                 
-            # Pasaport No Yakalama
+            # Pasaport Numarası
             if not pass_no:
                 m_pass = re.search(r'\b([UuVv]\d{8})\b', clean_search)
                 if m_pass:
                     pass_no = m_pass.group(1).upper().replace('V', 'U')
                 
-            # Liman Cüzdanı (SB) Yakalama
+            # Liman Cüzdanı (Seaman's Book)
             if not sb:
                 m_sb = re.search(r'([S58$]\s*00\d{5,7})', clean_search, re.IGNORECASE)
                 if m_sb:
                     sb = clean_sb(m_sb.group(1))
 
-            # MRZ Üzerinden İsim Soyisim
+            # MRZ Üzerinden İsim Soyisim Çıkarımı
             for line in text.upper().split('\n'):
                 line_c = line.replace(" ", "")
-                if "<<" in line_c and ("P<TUR" in line_c or "G<TUR" in line_c or "I<TUR" in line_c):
+                if "<<" in line_c and ("P<TUR" in line_c or "G<TUR" in line_c or "I<TUR" in line_c or "P<" in line_c):
                     parts = line_c.split("<<")
                     if len(parts) >= 2:
-                        surname = parts[0].replace("P<TUR", "").replace("G<TUR", "").replace("I<TUR", "").replace("<", "").strip()
+                        surname = re.sub(r'^[A-Z]<[A-Z]{3}', '', parts[0]).replace("<", "").strip()
                         name = parts[1].replace("<", " ").strip().split()[0]
                         if len(surname) > 1 and len(name) > 1:
                             best_name = f"{name} {surname}"
@@ -228,7 +266,14 @@ def extract_data(files):
 
     return best_name, tckn, sb, pass_no, text_blob
 
-uploaded_files = st.file_uploader("Evrakları Yükleyin (Tümü)", type=["pdf", "jpg", "jpeg", "png", "xlsx"], accept_multiple_files=True)
+# =============================================================================
+# DOSYA YÜKLEME VE KİMLİK / UYRUK DENETİMİ
+# =============================================================================
+uploaded_files = st.file_uploader(
+    "Evrakları Yükleyin (PDF, JPG, PNG, XLSX)",
+    type=["pdf", "jpg", "jpeg", "png", "xlsx"],
+    accept_multiple_files=True
+)
 
 if uploaded_files:
     crew_name, tckn_val, sb_val, pass_val, evidence_text = extract_data(uploaded_files)
@@ -237,21 +282,32 @@ if uploaded_files:
     with col1:
         st.text_input("Personel Adı Soyadı", value=crew_name, disabled=True)
     with col2:
-        st.text_input("T.C. Kimlik No", value=tckn_val, disabled=True)
+        label_id = "T.C. Kimlik No" if nationality == "Turkish" else f"National ID ({nationality})"
+        st.text_input(label_id, value=tckn_val, disabled=True)
     with col3:
         st.text_input("Liman Cüzdan No (SB)", value=sb_val, disabled=True)
     with col4:
         st.text_input("Pasaport No", value=pass_val, disabled=True)
         
     validation_locked = False
-    if not tckn_val or not sb_val:
-        st.error("🚨 SİSTEM KİLİTLİ: TCKN veya Liman Cüzdan Numarası belgelerden otomatik okunamadı.")
-        validation_locked = True
-    else:
-        st.success("✅ Veriler belgeden bağımsız olarak çekildi ve doğrulandı.")
-        uab_url = f"https://gemiadami.uab.gov.tr/verification/{tckn_val}/{sb_val}"
-        st.markdown(f'<a href="{uab_url}" target="_blank" style="background-color: #0056b3; color: white; padding: 8px 16px; border-radius: 4px; text-decoration: none; font-weight: bold; display: inline-block; margin-bottom: 10px;">UAB Doğrulama Portalı ↗</a>', unsafe_allow_html=True)
     
+    # Uyruğa Göre Katı Kilit Mantığı:
+    if nationality == "Turkish":
+        if not tckn_val or not sb_val:
+            st.error("🚨 SİSTEM KİLİTLİ: Türk personel için TCKN veya Liman Cüzdan Numarası belgelerden okunamadı.")
+            validation_locked = True
+        else:
+            st.success("✅ Veriler belgeden bağımsız olarak çekildi ve doğrulandı.")
+            uab_url = f"https://gemiadami.uab.gov.tr/verification/{tckn_val}/{sb_val}"
+            st.markdown(f'<a href="{uab_url}" target="_blank" style="background-color: #0056b3; color: white; padding: 8px 16px; border-radius: 4px; text-decoration: none; font-weight: bold; display: inline-block; margin-bottom: 10px;">UAB Doğrulama Portalı ↗</a>', unsafe_allow_html=True)
+    else:
+        # Yabancı Personel: TCKN zorunlu değildir; Pasaport + Liman Cüzdanı (SID) zorunludur
+        if not pass_val or not sb_val:
+            st.error(f"🚨 SİSTEM KİLİTLİ: {nationality} personel için Pasaport No veya Seaman's Book No okunamadı.")
+            validation_locked = True
+        else:
+            st.success(f"✅ {nationality} personel evrakları (Pasaport: {pass_val} / Seaman's Book: {sb_val}) başarıyla doğrulandı.")
+
     st.divider()
 
     # =========================================================================
@@ -263,7 +319,7 @@ if uploaded_files:
             wb = openpyxl.Workbook()
             ws1 = wb.active
             ws1.title = "35-101"
-            ws1['A1'] = "HATA: template_35_101.xlsx bulunamadı! Lütfen repoya yükleyin."
+            ws1['A1'] = "HATA: template_35_101.xlsx bulunamadı! Lütfen proje ana dizinine yükleyin."
             buf = io.BytesIO()
             wb.save(buf)
             return buf.getvalue()
@@ -285,7 +341,7 @@ if uploaded_files:
         intersect_green = PatternFill(start_color="C6E0B4", end_color="C6E0B4", fill_type="solid")
         intersect_red = PatternFill(start_color="FF9999", end_color="FF9999", fill_type="solid")
         
-        # Seçilen rütbe sütununu sarı yap
+        # Seçilen rütbe sütununu boydan boya sarı vurgula
         for r in range(14, 85):
             c_cell = ws1.cell(r, rank_col)
             if type(c_cell) is not openpyxl.cell.cell.MergedCell:
@@ -337,7 +393,7 @@ if uploaded_files:
         template_file = "template_35_102.docx"
         if not os.path.exists(template_file):
             doc = docx.Document()
-            doc.add_paragraph("HATA: template_35_102.docx bulunamadı! Lütfen repoya yükleyin.")
+            doc.add_paragraph("HATA: template_35_102.docx bulunamadı! Lütfen proje ana dizinine yükleyin.")
             buf = io.BytesIO()
             doc.save(buf)
             return buf.getvalue()
@@ -348,9 +404,9 @@ if uploaded_files:
         table.rows[0].cells[3].text = vessel_name
         table.rows[0].cells[7].text = join_date.strftime("%d.%m.%Y")
         table.rows[1].cells[3].text = crew_name
-        table.rows[1].cells[7].text = vessel_flag
+        table.rows[1].cells[7].text = vessel_flag if vessel_flag else ""
         table.rows[2].cells[3].text = rank
-        table.rows[2].cells[7].text = ecdis_model if ecdis_model else "N/A"
+        table.rows[2].cells[7].text = ecdis_type if ecdis_type else "N/A"
         
         def set_status(row_idx, is_yes=True, is_na=False):
             cell = table.rows[row_idx].cells[-1]
@@ -364,23 +420,29 @@ if uploaded_files:
         has_cra = any(kw in evidence_text for kw in ["cra", "endorsement"]) if not validation_locked else False
         ecdis_req = rank in ["Master", "Chief officer", "2 nd Officer", "3 rd Officer"]
         
+        # Licence Check
         set_status(5, is_yes=True)
         set_status(6, is_yes=True)
         set_status(7, is_yes=has_cra if is_officer else True, is_na=not is_officer and not has_cra)
         
+        # Company Rules Check
         set_status(9, is_yes=True)
         set_status(10, is_yes=True)
         set_status(11, is_yes=True)
         set_status(12, is_yes=True)
         set_status(13, is_yes=True)
         set_status(14, is_yes=True)
-        table.rows[14].cells[1].text = f"Id card (T.C. Kimlik: {tckn_val})"
+        
+        id_display = tckn_val if nationality == "Turkish" else pass_val
+        table.rows[14].cells[1].text = f"Id card (ID / Passport: {id_display})"
+        
         set_status(15, is_yes=True)
         set_status(16, is_yes=True)
         set_status(17, is_yes=True)
         set_status(18, is_yes=True)
         set_status(19, is_yes=True)
         
+        # Training & Quality Requirement Checks
         set_status(21, is_yes=ecdis_req, is_na=not ecdis_req)
         set_status(22, is_yes=ecdis_req, is_na=not ecdis_req)
         set_status(23, is_yes=is_officer, is_na=not is_officer)
@@ -393,6 +455,16 @@ if uploaded_files:
 
     c1, c2 = st.columns(2)
     with c1:
-        st.download_button("📊 Orijinal 35-101 Excel İndir", build_excel_from_template(), f"35-101_{crew_name}.xlsx", disabled=validation_locked)
+        st.download_button(
+            "📊 Orijinal 35-101 Excel İndir",
+            build_excel_from_template(),
+            f"35-101_{crew_name}.xlsx",
+            disabled=validation_locked
+        )
     with c2:
-        st.download_button("📝 Orijinal 35-102 Word İndir", build_word_from_template(), f"35-102_{crew_name}.docx", disabled=validation_locked)
+        st.download_button(
+            "📝 Orijinal 35-102 Word İndir",
+            build_word_from_template(),
+            f"35-102_{crew_name}.docx",
+            disabled=validation_locked
+        )
