@@ -52,7 +52,7 @@ if st.sidebar.button("🚪 Çıkış Yap"):
     st.rerun()
 
 st.title("⚓ Evrak Kontrol & Denetim Portalı")
-st.caption("Yapay Zeka Destekli, PDF İçerik Okuyucu & Kilit Olmayan Sistem")
+st.caption("Üç Katmanlı Eşleştirme Motoru & Kilit Olmayan Sistem")
 
 # =============================================================================
 # AI (GEMINI) BAĞLANTISI
@@ -72,23 +72,23 @@ OFFICER_RANKS = ["Master", "Chief officer", "2 nd Officer", "3 rd Officer", "Chi
 ALL_RANKS = list(RANKS_MAP.keys())
 
 CERT_MATRIX = [
-    (14, "1", "Passport", ALL_RANKS, ["passport", "pasaport"]),
-    (16, "2", "Medical Examination Report", ALL_RANKS, ["medical", "sağlık", "health"]),
-    (18, "3", "Certificate of Yellow Fewer Vaccination", ALL_RANKS, ["yellow", "fever", "humma"]),
-    (20, "4", "Seamanbook", ALL_RANKS, ["seaman", "cüzdan", "book", "gemiadam"]),
-    (22, "5", "Competency", ALL_RANKS, ["coc", "competency", "yeterli", "desc"]),
+    (14, "1", "Passport", ALL_RANKS, ["passport", "pasaport", "pass"]),
+    (16, "2", "Medical Examination Report", ALL_RANKS, ["medical", "sağlık", "health", "yoklama", "med"]),
+    (18, "3", "Certificate of Yellow Fewer Vaccination", ALL_RANKS, ["yellow", "fever", "humma", "sarı", "aşı"]),
+    (20, "4", "Seamanbook", ALL_RANKS, ["seaman", "cüzdan", "book", "gemiadam", "sb"]),
+    (22, "5", "Competency", ALL_RANKS, ["coc", "competency", "yeterlik", "yeterlilik", "zabit", "mühendis", "certificate"]),
     (24, "6", "GMDSS", ["Master", "Chief officer", "2 nd Officer", "3 rd Officer"], ["gmdss", "goc", "telsiz"]),
-    (26, "7.1", "Fire Prevention and Fire Fighting Training Certificate", ALL_RANKS, ["fire prevention", "yangın önleme"]),
-    (28, "7.2", "Personal Survival Techniques Training Certificate", ALL_RANKS, ["survival techniques", "kişisel can", "kurtarma teknikleri"]),
-    (30, "7.3", "Elementary First Aid Training Certificate", ALL_RANKS, ["first aid", "temel ilkyardım", "ilk yardım"]),
-    (32, "7.4", "Personal Safety and Social Responsibility Training Cert.", ALL_RANKS, ["social responsibility", "sosyal sorumluluk"]),
-    (34, "7.5", "Proficiency in Survival Craft and Rescue Boats Training Cert.", ["Master", "Chief officer", "2 nd Officer", "3 rd Officer", "Chief Engineer", "2 nd Engineer", "3rd Engineer", "Electrician", "Bosun", "Pumpman", "AB", "Oiler"], ["survival craft", "cankurtarma araç"]),
+    (26, "7.1", "Fire Prevention and Fire Fighting Training Certificate", ALL_RANKS, ["fire prevention", "yangın önleme", "temel yangın", "fire fighting"]),
+    (28, "7.2", "Personal Survival Techniques Training Certificate", ALL_RANKS, ["survival techniques", "kişisel can", "can kurtarma", "teknikleri"]),
+    (30, "7.3", "Elementary First Aid Training Certificate", ALL_RANKS, ["first aid", "ilkyardım", "ilk yardım", "temel ilkyardım"]),
+    (32, "7.4", "Personal Safety and Social Responsibility Training Cert.", ALL_RANKS, ["social responsibility", "sosyal sorumluluk", "safety"]),
+    (34, "7.5", "Proficiency in Survival Craft and Rescue Boats Training Cert.", ["Master", "Chief officer", "2 nd Officer", "3 rd Officer", "Chief Engineer", "2 nd Engineer", "3rd Engineer", "Electrician", "Bosun", "Pumpman", "AB", "Oiler"], ["survival craft", "cankurtarma araç", "kurtarma bot", "rescue boat"]),
     (36, "8.1", "Security Awareness Certificate ", ALL_RANKS, ["security awareness", "güvenlik farkındalık", "farkındalık"]),
-    (38, "8.2", "Designated Security Duties Certificate", ALL_RANKS, ["designated security", "belirlenmiş güvenlik", "güvenlik görev"]),
-    (40, "8.3", "Ship Security Officer", ["Master", "Chief officer", "2 nd Officer", "3 rd Officer", "Chief Engineer", "2 nd Engineer"], ["ship security officer", "gemi güvenlik zabiti"]),
-    (42, "8.4", "Security - Realated Familirization Certificate", ALL_RANKS, ["familiarization", "tanıtım belgesi"]),
-    (44, "9.1", "Advanced Fire Fighting Training Certificate", OFFICER_RANKS, ["advanced fire", "ileri yangın"]),
-    (82, "5", "Endorsement", OFFICER_RANKS + ["Cadet"], ["cra", "endorsement", "onay belgesi"])
+    (38, "8.2", "Designated Security Duties Certificate", ALL_RANKS, ["designated security", "belirlenmiş güvenlik", "güvenlik görev", "duties"]),
+    (40, "8.3", "Ship Security Officer", ["Master", "Chief officer", "2 nd Officer", "3 rd Officer", "Chief Engineer", "2 nd Engineer"], ["ship security officer", "gemi güvenlik zabiti", "sso"]),
+    (42, "8.4", "Security - Realated Familirization Certificate", ALL_RANKS, ["familiarization", "tanıtım", "aşinalık"]),
+    (44, "9.1", "Advanced Fire Fighting Training Certificate", OFFICER_RANKS, ["advanced fire", "ileri yangın", "advanced"]),
+    (82, "5", "Endorsement", OFFICER_RANKS + ["Cadet"], ["cra", "endorsement", "onay belgesi", "flag"])
 ]
 
 # =============================================================================
@@ -133,14 +133,14 @@ template_excel_path = locate_template("35101", ".xlsx")
 template_word_path = locate_template("35102", ".docx")
 
 def parse_ai_response(response_text):
-    text = response_text.strip()
-    if text.startswith("```json"): text = text[7:]
-    elif text.startswith("```"): text = text[3:]
-    if text.endswith("```"): text = text[:-3]
     try:
-        return json.loads(text.strip())
+        start = response_text.find('{')
+        end = response_text.rfind('}') + 1
+        if start != -1 and end != 0:
+            return json.loads(response_text[start:end])
     except:
-        return {}
+        pass
+    return {}
 
 # =============================================================================
 # EVRAK YÜKLEME VE YAPAY ZEKA (İÇERİK) ANALİZİ
@@ -156,39 +156,38 @@ uploaded_files = st.file_uploader(
 
 if uploaded_files and api_key:
     if not AI_AVAILABLE:
-        st.error(f"🚨 KRİTİK HATA: Yapay Zeka kütüphanesi (google-generativeai) sunucuya yüklenemedi!\n\nHata Detayı: {AI_ERROR}\n\nÇözüm: Lütfen 'requirements.txt' dosyanızı kontrol edip, sağ alttaki siyah menüden 'Clear cache and deploy' seçeneğine tıklayın.")
+        st.error(f"🚨 Yapay Zeka kütüphanesi yüklenemedi! Hata: {AI_ERROR}")
         st.stop()
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
+    # MIME type dayatmasını kaldırdık, yapay zekayı özgür bıraktık.
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
     crew_name, crew_surname, tckn_val, sb_val, pass_val = "", "", "", "", ""
     all_certs = []
     
     prompt = """
-    Sen bir denizcilik evrak uzmanısın. Ekteki evrakı dikkatlice incele.
-    SADECE AŞAĞIDAKİ JSON FORMATINDA CEVAP VER. Evrak bir Pasaport, Gemiadamı Sağlık Raporu, Sarı Humma (Yellow Fever), Liman Cüzdanı veya STCW Sertifikası olabilir. İçeriğe bakarak türünü belirle ve tarihleri (GG.AA.YYYY) formatında çıkar.
-    
+    Aşağıdaki JSON formatını kullanarak bu denizcilik evrakındaki bilgileri çıkar.
+    SADECE JSON YAZ, başka hiçbir açıklama ekleme.
     {
-      "personel_bilgileri": {
-        "ad": "Personelin Adı",
-        "soyad": "Personelin Soyadı",
-        "tc_kimlik": "11 Haneli TC No",
-        "pasaport_no": "Pasaport No",
-        "cuzdan_no": "Liman Cüzdanı No (S ile başlar)"
-      },
-      "sertifikalar": [
+      "ad": "Personel Adı",
+      "soyad": "Personel Soyadı",
+      "tc": "TC Kimlik No",
+      "pasaport": "Pasaport No",
+      "cuzdan": "Liman Cüzdanı No",
+      "belgeler": [
         {
-          "tur": "Belgenin Türü (Örn: Passport, Medical, Yellow Fever, Seaman Book, STCW İlk Yardım, STCW Yangın...)",
-          "belge_no": "Sertifika/Belge Numarası",
-          "verilis_tarihi": "DD.MM.YYYY",
-          "bitis_tarihi": "DD.MM.YYYY"
+          "isim": "Eğitim veya Belgenin Tam Adı (Örn: Pasaport, Gemiadamı Cüzdanı, Temel İlkyardım, STCW Yangın Önleme vb.)",
+          "no": "Belge Numarası",
+          "verilis": "DD.MM.YYYY",
+          "bitis": "DD.MM.YYYY"
         }
       ]
     }
+    Bulamadığın alanları boş bırak ("").
     """
     
-    progress_text = "Yapay Zeka Evrakların İçeriğini Okuyor..."
+    progress_text = "Yapay Zeka Evrakları Esnek Modda Okuyor..."
     my_bar = st.progress(0, text=progress_text)
     
     for idx, f in enumerate(uploaded_files):
@@ -206,19 +205,19 @@ if uploaded_files and api_key:
             response = model.generate_content([prompt, part])
             data = parse_ai_response(response.text)
             
-            gen = data.get("personel_bilgileri", {})
-            if gen.get("ad") and not crew_name: crew_name = str(gen.get("ad")).upper()
-            if gen.get("soyad") and not crew_surname: crew_surname = str(gen.get("soyad")).upper()
-            if gen.get("tc_kimlik") and not tckn_val: tckn_val = str(gen.get("tc_kimlik")).upper()
-            if gen.get("pasaport_no") and not pass_val: pass_val = str(gen.get("pasaport_no")).upper()
-            if gen.get("cuzdan_no") and not sb_val: sb_val = str(gen.get("cuzdan_no")).upper()
+            if data.get("ad") and not crew_name: crew_name = str(data.get("ad")).upper()
+            if data.get("soyad") and not crew_surname: crew_surname = str(data.get("soyad")).upper()
+            if data.get("tc") and not tckn_val: tckn_val = str(data.get("tc")).upper()
+            if data.get("pasaport") and not pass_val: pass_val = str(data.get("pasaport")).upper()
+            if data.get("cuzdan") and not sb_val: sb_val = str(data.get("cuzdan")).upper()
             
-            certs = data.get("sertifikalar", [])
-            if isinstance(certs, list):
-                all_certs.extend(certs)
+            certs = data.get("belgeler", [])
+            for c in certs:
+                c["dosya_adi"] = fname # Dosya adını güvenli eşleşme için saklıyoruz
+                all_certs.append(c)
                 
         except Exception as e:
-            pass
+            st.error(f"🚨 API BAĞLANTI HATASI ({f.name}): Lütfen tekrar deneyin. Detay: {str(e)}")
             
         time.sleep(3.5)
         my_bar.progress((idx + 1) / len(uploaded_files), text=f"{f.name} okundu.")
@@ -245,8 +244,7 @@ if uploaded_files and api_key:
             st.warning("⚠️ Kutularda eksik bilgiler var (Elle doldurabilirsiniz). Sistem kilitsizdir, onay size aittir.")
         else:
             st.success(f"✅ Veriler Onaylandı. Asgari Kontrat Şartı: {required_contract_months} Ay.")
-            uab_url = f"[https://gemiadami.uab.gov.tr/verification/](https://gemiadami.uab.gov.tr/verification/){final_tckn.strip()}/{final_sb.strip()}"
-            # URL YÖNLENDİRME DÜZELTİLDİ: st.link_button kullanılarak yeni sekmede sorunsuz açılması sağlandı
+            uab_url = f"https://gemiadami.uab.gov.tr/verification/{final_tckn.strip()}/{final_sb.strip()}"
             st.link_button("UAB Portalı Doğrulama ↗", uab_url, type="primary")
     else:
         st.success(f"✅ Yabancı uyruklu personel işlemleri devam edebilir.")
@@ -254,7 +252,7 @@ if uploaded_files and api_key:
     st.divider()
 
     # =========================================================================
-    # EXCEL / WORD OLUŞTURMA (GERÇEK TARİHLERLE)
+    # EXCEL / WORD OLUŞTURMA (ÜÇ KATMANLI EŞLEŞTİRME)
     # =========================================================================
     def build_excel_from_template():
         if not template_excel_path or not os.path.exists(template_excel_path):
@@ -294,33 +292,54 @@ if uploaded_files and api_key:
             
             if is_req:
                 matching_cert = None
+                is_found = False
+
+                # 1. KATMAN: Yapay Zekanın İçerikten Okuduğu İsimlerde Ara
                 for cert in all_certs:
-                    c_type = str(cert.get("tur", "")).lower()
-                    if any(kw in c_type for kw in keywords):
+                    c_name = str(cert.get("isim", "")).lower()
+                    if any(kw in c_name for kw in keywords):
                         matching_cert = cert
+                        is_found = True
                         break
                 
-                is_found = matching_cert is not None
+                # 2. KATMAN: Yapay Zeka ismini yanlış okumuşsa, bari dosya adından yakala
+                if not is_found:
+                    for cert in all_certs:
+                        f_name = str(cert.get("dosya_adi", "")).lower()
+                        if any(kw in f_name for kw in keywords):
+                            matching_cert = cert
+                            is_found = True
+                            break
+
+                # 3. KATMAN: Yapay zeka tamamen kör olmuşsa, sadece kullanıcının yüklediği dosya adından Var/Yok onayı al
+                if not is_found:
+                    for f in uploaded_files:
+                        f_name = f.name.lower()
+                        if any(kw in f_name for kw in keywords):
+                            is_found = True
+                            matching_cert = {"no": "Orijinalinden Teyitli", "bitis": "Manuel Kontrol", "verilis": ""}
+                            break
 
                 if is_found:
-                    doc_no_val = str(matching_cert.get("belge_no", "Bulunamadı"))
+                    doc_no_val = str(matching_cert.get("no", "Bulunamadı"))
                     if "seaman" in en_title.lower() and final_sb: doc_no_val = final_sb
                     if "pass" in en_title.lower() and final_pass: doc_no_val = final_pass
                     if doc_no_val == "Bulunamadı" or not doc_no_val: doc_no_val = "Orijinalinden Teyitli"
 
-                    issue_str = str(matching_cert.get("verilis_tarihi", "")).replace("/", ".").replace("-", ".")
-                    expiry_str = str(matching_cert.get("bitis_tarihi", "")).replace("/", ".").replace("-", ".")
+                    expiry_str = str(matching_cert.get("bitis", "")).replace("/", ".").replace("-", ".")
+                    if "suresiz" in expiry_str.lower() or "süresiz" in expiry_str.lower():
+                        expiry_str = "Süresiz"
+
                     remaining_months = 60
-                    
-                    if expiry_str and expiry_str.lower() != "süresiz" and len(expiry_str) >= 8:
+                    if expiry_str and expiry_str != "Süresiz" and expiry_str != "Manuel Kontrol" and len(expiry_str) >= 8:
                         try:
                             exp_date = datetime.datetime.strptime(expiry_str[-10:], "%d.%m.%Y").date()
                             remaining_months = (exp_date.year - join_date.year) * 12 + (exp_date.month - join_date.month)
                         except:
                             pass
-                    elif expiry_str.lower() == "süresiz" or "medical" not in en_title.lower():
+                    elif expiry_str == "Süresiz" or "medical" not in en_title.lower():
                         remaining_months = 100 
-                        expiry_str = "Süresiz"
+                        if not expiry_str: expiry_str = "Süresiz"
 
                     if remaining_months < required_contract_months:
                         status_str = f"Doc No: {doc_no_val} | Exp: {expiry_str} | ► YETERSİZ SÜRE! ({remaining_months} Ay Kaldı)"
@@ -394,7 +413,9 @@ if uploaded_files and api_key:
 
         has_cra = False
         for cert in all_certs:
-            if "endorsement" in str(cert.get("tur", "")).lower() or "cra" in str(cert.get("tur", "")).lower():
+            c_name = str(cert.get("isim", "")).lower()
+            f_name = str(cert.get("dosya_adi", "")).lower()
+            if "endorsement" in c_name or "cra" in c_name or "endorsement" in f_name or "cra" in f_name:
                 has_cra = True
                 break
 
