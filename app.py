@@ -3,19 +3,13 @@ import datetime
 from dateutil.relativedelta import relativedelta
 import io
 import os
-import re
-import pypdf
+import json
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment
 import docx
 from PIL import Image
-
-try:
-    import pytesseract
-    from pdf2image import convert_from_bytes
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
+import google.generativeai as genai
+from pdf2image import convert_from_bytes
 
 st.set_page_config(page_title="Evrak Kontrol Portalı", page_icon="⚓", layout="wide")
 
@@ -52,8 +46,19 @@ if st.sidebar.button("🚪 Çıkış Yap"):
     st.session_state["authenticated"] = False
     st.rerun()
 
-st.title("⚓ Evrak Kontrol & Denetim Portalı")
-st.caption("Hedefli Belge Ayrıştırma, Kontrat Emniyeti & 35-101 / 35-102 Çıktı Motoru")
+st.title("⚓ Evrak Kontrol & Denetim Portalı (AI Vision Modu)")
+st.caption("Yapay Zeka Destekli, Esnek ve Kilit Olmayan Kontrat Emniyet Motoru")
+
+# =============================================================================
+# YAPAY ZEKA (GEMINI) BAĞLANTISI
+# =============================================================================
+api_key = st.sidebar.text_input("🔑 Google Gemini API Key", type="password", placeholder="AIzaSy...")
+if api_key:
+    genai.configure(api_key=api_key)
+    # Hızlı ve JSON formatında okuma yapabilen Gemini 1.5 Flash modelini kullanıyoruz
+    model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
+else:
+    st.sidebar.warning("Sistemin otomatik okuma yapabilmesi için lütfen AI Studio'dan aldığınız API Anahtarını giriniz.")
 
 # =============================================================================
 # KURUMSAL 35-101 MATRİS TANIMLARI
@@ -135,225 +140,54 @@ template_excel_path = locate_template("35101", ".xlsx")
 template_word_path = locate_template("35102", ".docx")
 
 # =============================================================================
-# HEDEFLİ VERİ AYIKLAMA MOTORU
+# YAPAY ZEKA GÖRSEL İŞLEME MOTORU (VISION AI)
 # =============================================================================
-def is_passport_file(fname):
-    f = fname.lower()
-    return any(w in f for w in ["pasaport", "passport", "pass"]) or bool(re.search(r'\bpp\b', f))
-
-def is_seaman_file(fname):
-    f = fname.lower()
-    return any(w in f for w in ["seaman", "seamans", "cuzdan", "cüzdan", "liman"]) or bool(re.search(r'\bsb\b', f))
-
-def run_ocr(pil_img):
-    if not OCR_AVAILABLE:
-        return ""
-    try:
-        gray = pil_img.convert('L')
-        return pytesseract.image_to_string(gray, lang="tur+eng")
-    except Exception:
-        try:
-            return pytesseract.image_to_string(pil_img, lang="eng")
-        except Exception:
-            return ""
-
-def format_seaman_number(raw_text):
-    m = re.search(r'\b([S58$])\s*(00\d{5,7})\b', raw_text, re.IGNORECASE)
-    if m:
-        return "S" + m.group(2)
-    m2 = re.search(r'\b([S58$]00\d{5,7})\b', raw_text, re.IGNORECASE)
-    if m2:
-        return "S" + m2.group(1)[1:]
-    m_shift = re.search(r'(\d{5,7}[S58$]\d*)', raw_text, re.IGNORECASE)
-    if m_shift:
-        digits = "".join([c for c in m_shift.group(1) if c.isdigit()])
-        if len(digits) >= 7:
-            if not digits.startswith("00"):
-                digits = "00" + digits
-            return f"S{digits[:8]}"
-    m_dig = re.search(r'\b(00\d{6})\b', raw_text)
-    if m_dig:
-        return "S" + m_dig.group(1)
-    return ""
-
-HEADER_TOKENS = {
-    "SOYADI", "SURNAME", "SURMAE", "SURNAM",
-    "ADI", "NAME", "MAME", "GIVEN", "FIRST",
-    "TÜRÜ", "TYPE", "KODU", "CODE",
-    "PASAPORT", "PASSPORT", "CINSIYET", "SEX",
-    "UYRUĞU", "UYRUK", "NATIONALITY",
-    "KİMLİK", "KIMLIK", "PERS", "ID", "NO", "DOĞUM", "BIRTH",
-    "TÜRKİYE", "REPUBLIC", "CUMHURİYET", "TURKEY",
-    "VEREN", "MAKAM", "ISSUED", "DATE", "TARİHİ", "TARIHI",
-    "HAMİLİNİN", "IMZASI", "SIGNATURE", "HOLDER",
-    "BABA", "ANA", "ADLI", "SICIL", "SEAMAN", "SEAMANS", "BOOK"
-}
-
-def is_header_line(line):
-    words = re.findall(r'[a-zA-ZÇĞİÖŞÜçğıöşü]+', line.upper())
-    if not words:
-        return True
-    matching = [w for w in words if any(ht in w or w in ht for ht in HEADER_TOKENS)]
-    return len(matching) / len(words) >= 0.5
-
-def clean_alpha_name(raw_s):
-    clean = "".join([c for c in raw_s if c.isalpha() or c.isspace()])
-    cyr_map = {'А': 'A', 'В': 'B', 'Е': 'E', 'К': 'K', 'М': 'M', 'Н': 'H', 'О': 'O', 'Р': 'P', 'С': 'C', 'Т': 'T', 'Х': 'X'}
-    res = "".join([cyr_map.get(c, c) for c in clean])
-    return " ".join(res.split()).upper()
-
-def extract_name_from_passport_text(text):
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    for l in lines:
-        cl = l.replace(" ", "").upper()
-        m_mrz = re.search(r'P[<C\(\[\{][A-Z0-9]{3}([A-Z]+)<<([A-Z<]+)', cl)
-        if m_mrz:
-            sur = m_mrz.group(1).replace("<", "").strip()
-            givens = [p for p in m_mrz.group(2).split("<") if p]
-            giv = " ".join(givens).strip()
-            if len(sur) >= 2 and len(giv) >= 2 and sur not in HEADER_TOKENS:
-                return f"{clean_alpha_name(giv)} {clean_alpha_name(sur)}"
-                
-    surname = ""
-    given_name = ""
-    for idx, l in enumerate(lines):
-        l_up = l.upper()
-        if ("SOYAD" in l_up or "SURNAME" in l_up or "SURMAE" in l_up) and not surname:
-            for j in range(idx + 1, min(idx + 5, len(lines))):
-                candidate = lines[j].strip()
-                if candidate and not is_header_line(candidate):
-                    cand_c = clean_alpha_name(candidate)
-                    if len(cand_c) >= 2 and cand_c not in HEADER_TOKENS:
-                        surname = cand_c.split()[0]
-                        break
-                        
-        if ("ADI" in l_up or "NAME" in l_up or "MAME" in l_up) and not given_name:
-            if not any(k in l_up for k in ["SOYAD", "BABA", "ANA"]):
-                for j in range(idx + 1, min(idx + 5, len(lines))):
-                    candidate = lines[j].strip()
-                    if candidate and not is_header_line(candidate):
-                        cand_c = clean_alpha_name(candidate)
-                        if len(cand_c) >= 2 and cand_c not in HEADER_TOKENS:
-                            given_name = cand_c
-                            break
-
-    if given_name and surname and given_name != surname:
-        return f"{given_name} {surname}"
-    return ""
-
-def extract_name_from_seaman_text(text):
-    clean = text.replace(" ", "").upper()
-    m_sb_mrz = re.search(r'G[<C][A-Z0-9]{3}([A-Z<]+)', clean)
-    if m_sb_mrz:
-        parts = [clean_alpha_name(p) for p in m_sb_mrz.group(1).split("<") if len(p) >= 2 and clean_alpha_name(p) not in HEADER_TOKENS]
-        if len(parts) >= 2:
-            return " ".join(parts)
-    return extract_name_from_passport_text(text)
-
-def extract_data(files):
-    tckn, sb, pass_no, text_blob = "", "", "", ""
-    best_name = ""
+def extract_info_via_ai(pil_image, fname):
+    """Görseli Gemini AI'a gönderir ve yapılandırılmış JSON verisi alır."""
+    prompt = """
+    Bu bir denizcilik evrakıdır (Pasaport, Liman Cüzdanı, STCW Sertifikası veya Sağlık Raporu olabilir).
+    Lütfen evraka bir insan gibi bakarak aşağıdaki bilgileri çıkar ve SADECE JSON formatında ver. 
+    Eğer bir veri evrakta yoksa veya okunamıyorsa değerini boş string ("") yap. 
+    Lütfen ad ve soyad bilgisini, TCKN'yi, Pasaport veya Cüzdan Numarasını, Veriliş(Issue) ve Bitiş(Expiry) tarihlerini dikkatle incele.
+    Tarihleri DD.MM.YYYY formatına çevirerek ver.
     
-    with st.spinner("Evraklar kural matrisine göre taranıyor..."):
-        for f in files:
-            content = f.read()
-            f.seek(0)
-            fname = f.name.lower()
-            text = ""
-            
-            is_pass = is_passport_file(fname)
-            is_sb = is_seaman_file(fname)
-            
-            if is_pass or is_sb:
-                if fname.endswith(".pdf"):
-                    try:
-                        reader = pypdf.PdfReader(io.BytesIO(content))
-                        for page in reader.pages:
-                            text += (page.extract_text() or "") + "\n"
-                        
-                        if OCR_AVAILABLE:
-                            for page in reader.pages:
-                                for img_obj in page.images:
-                                    if len(img_obj.data) > 50000:
-                                        try:
-                                            pil_img = Image.open(io.BytesIO(img_obj.data))
-                                            text += run_ocr(pil_img) + "\n"
-                                        except Exception:
-                                            pass
-                            if len(text.strip()) < 100:
-                                try:
-                                    imgs = convert_from_bytes(content, first_page=1, last_page=1, dpi=200)
-                                    if imgs:
-                                        text += run_ocr(imgs[0]) + "\n"
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-                elif fname.endswith((".jpg", ".jpeg", ".png")) and OCR_AVAILABLE:
-                    try:
-                        pil_img = Image.open(io.BytesIO(content))
-                        text += run_ocr(pil_img) + "\n"
-                    except Exception:
-                        pass
-            else:
-                if fname.endswith(".pdf"):
-                    try:
-                        reader = pypdf.PdfReader(io.BytesIO(content))
-                        for page in reader.pages:
-                            text += (page.extract_text() or "") + " "
-                    except Exception:
-                        pass
+    JSON Formatı:
+    {
+      "name": "Sadece Personelin Adı",
+      "surname": "Sadece Personelin Soyadı",
+      "tckn": "11 Haneli TC Kimlik Numarası",
+      "passport_no": "Pasaport Numarası",
+      "seaman_book_no": "Liman Cüzdan Numarası (Genelde S ile başlar)",
+      "issue_date": "Evrakın veriliş tarihi (DD.MM.YYYY)",
+      "expiry_date": "Evrakın bitiş tarihi (DD.MM.YYYY)"
+    }
+    """
+    try:
+        response = model.generate_content([prompt, pil_image])
+        return json.loads(response.text)
+    except Exception as e:
+        return {}
 
-            text_blob += f" {fname} {text.lower()} "
-            
-            # Pasaport Numarası
-            if is_pass and not pass_no:
-                m_p = re.search(r'([UVuv]\d{8})', text)
-                if m_p:
-                    pass_no = m_p.group(1).upper()
-                else:
-                    m_mrz_p = re.search(r'([UVuv][0-9]{8})\d[A-Z]{3}', text.replace(" ", ""))
-                    if m_mrz_p:
-                        pass_no = m_mrz_p.group(1).upper()
-
-            # TCKN
-            if (is_pass or is_sb) and not tckn and nationality == "Turkish":
-                clean_lines = [l.replace(" ", "") for l in text.splitlines()]
-                for cl in clean_lines:
-                    m_tc_mrz = re.search(r'\d{6}\d[MF<]\d{6}\d([1-9]\d{10})', cl)
-                    if m_tc_mrz:
-                        tckn = m_tc_mrz.group(1)
-                        break
-                if not tckn:
-                    m_tc = re.search(r'(?:K[İI]ML[İI]K|ID)\s*(?:NO)?[^\d]*([1-9]\d{10})', text, re.IGNORECASE)
-                    if m_tc:
-                        tckn = m_tc.group(1)
-                    else:
-                        m_tc2 = re.search(r'(?<!\d)([1-9]\d{10})(?!\d)', text)
-                        if m_tc2:
-                            tckn = m_tc2.group(1)
-
-            # Liman Cüzdan Numarası
-            if is_sb and not sb:
-                clean_lines = [l.replace(" ", "") for l in text.splitlines()]
-                for cl in clean_lines:
-                    m_mrz_sb = re.match(r'^([S58]\d{8})', cl, re.IGNORECASE)
-                    if m_mrz_sb:
-                        sb = "S" + m_mrz_sb.group(1)[1:9]
-                        break
-                if not sb:
-                    sb = format_seaman_number(text)
-
-            # İsim Çıkarımı
-            if is_pass and not best_name:
-                best_name = extract_name_from_passport_text(text)
-            elif is_sb and not best_name:
-                best_name = extract_name_from_seaman_text(text)
-
-    return best_name, tckn, sb, pass_no, text_blob
+def convert_to_image(file_obj, filename):
+    """PDF veya Resim dosyasını analiz için PIL Image nesnesine çevirir."""
+    content = file_obj.read()
+    file_obj.seek(0)
+    if filename.lower().endswith(".pdf"):
+        try:
+            images = convert_from_bytes(content, first_page=1, last_page=1, dpi=200)
+            if images:
+                return images[0]
+        except:
+            return None
+    elif filename.lower().endswith((".png", ".jpg", ".jpeg")):
+        try:
+            return Image.open(io.BytesIO(content)).convert('RGB')
+        except:
+            return None
+    return None
 
 # =============================================================================
-# EKRAN FORMU VE KATI DOĞRULAMA GEÇİDİ
+# ANA VERİ TOPLAMA VE DENETİM DÖNGÜSÜ
 # =============================================================================
 uploaded_files = st.file_uploader(
     "Evrakları Yükleyin (PDF, JPG, JPEG, PNG)",
@@ -362,52 +196,82 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    crew_name_ext, tckn_ext, sb_ext, pass_ext, evidence_text = extract_data(uploaded_files)
+    # Toplanacak Ana Veriler
+    crew_name = ""
+    crew_surname = ""
+    tckn_val = ""
+    sb_val = ""
+    pass_val = ""
     
+    # Evraklardan çekilen gerçek tarihler: {"pass": {"issue": "...", "expiry": "..."}, ...}
+    extracted_dates = {}
+    evidence_text = ""
+    
+    if api_key:
+        progress_text = "Yapay Zeka Evrakları Okuyor, Lütfen Bekleyin..."
+        my_bar = st.progress(0, text=progress_text)
+        
+        for idx, f in enumerate(uploaded_files):
+            fname = f.name.lower()
+            evidence_text += f" {fname} "
+            
+            pil_img = convert_to_image(f, fname)
+            if pil_img:
+                # Yapay Zekaya Gönder
+                ai_data = extract_info_via_ai(pil_img, fname)
+                
+                # Kimlik Bilgilerini Topla
+                if ai_data.get("name") and not crew_name: crew_name = ai_data.get("name").upper()
+                if ai_data.get("surname") and not crew_surname: crew_surname = ai_data.get("surname").upper()
+                if ai_data.get("tckn") and not tckn_val: tckn_val = ai_data.get("tckn")
+                if ai_data.get("passport_no") and not pass_val: pass_val = ai_data.get("passport_no")
+                if ai_data.get("seaman_book_no") and not sb_val: sb_val = ai_data.get("seaman_book_no")
+                
+                # Tarihleri Kaydet
+                issue_d = ai_data.get("issue_date", "")
+                expiry_d = ai_data.get("expiry_date", "")
+                if issue_d or expiry_d:
+                    # Dosya ismindeki anahtar kelimelere göre eşleştirme yap
+                    extracted_dates[fname] = {"issue": issue_d, "expiry": expiry_d}
+
+            my_bar.progress((idx + 1) / len(uploaded_files), text=f"{f.name} analiz edildi.")
+            
+        my_bar.empty()
+    else:
+        st.info("API Key girilmediği için evraklar sadece var/yok eşleşmesi için kullanılacak. Bilgileri manuel girebilirsiniz.")
+        for f in uploaded_files:
+            evidence_text += f" {f.name.lower()} "
+
     st.subheader("📋 Çıkarılan / Teyit Edilen Bilgiler")
-    st.caption("Veriler belgelerden çekilmiştir. Gerekirse kontrol edebilir veya tamamlayabilirsiniz.")
+    st.caption("AI tarafından okunan veriler. Yanlışlık varsa kutulardan **MANUEL OLARAK DÜZELTİN**. Sistem sizin yazdığınızı doğrudan doğru kabul edip kilitleri kaldıracaktır.")
     
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        crew_name = st.text_input("Personel Adı Soyadı", value=crew_name_ext)
+        full_name_input = f"{crew_name} {crew_surname}".strip()
+        final_crew_name = st.text_input("Personel Adı Soyadı", value=full_name_input)
     with col2:
         label_id = "T.C. Kimlik No" if nationality == "Turkish" else f"National ID ({nationality})"
-        tckn_val = st.text_input(label_id, value=tckn_ext)
+        final_tckn = st.text_input(label_id, value=tckn_val)
     with col3:
-        sb_val = st.text_input("Liman Cüzdan No (SB)", value=sb_ext)
+        final_sb = st.text_input("Liman Cüzdan No (SB)", value=sb_val)
     with col4:
-        pass_val = st.text_input("Pasaport No", value=pass_ext)
+        final_pass = st.text_input("Pasaport No", value=pass_val)
         
-    validation_locked = False
+    # KİLİT MEKANİZMASI İPTAL EDİLDİ - SADECE UYARI VERİR!
+    has_warning = False
     
     if nationality == "Turkish":
-        is_tckn_valid = bool(re.match(r'^[1-9]\d{10}$', tckn_val.strip()))
-        is_sb_valid = bool(re.match(r'^S00\d{5,7}$', sb_val.strip())) or bool(re.match(r'^S\d{7,8}$', sb_val.strip()))
-        
-        errors = []
-        clean_name = crew_name.strip()
-        has_invalid_word = any(bw in clean_name.upper().split() for bw in HEADER_TOKENS)
-        
-        if not clean_name or len(clean_name.split()) < 2 or has_invalid_word:
-            errors.append("Personel Adı Soyadı pasaporttan doğru okunamadı. Lütfen kutuya gerçek Ad ve Soyad giriniz.")
-        if not is_tckn_valid:
-            errors.append("11 haneli geçerli T.C. Kimlik Numarası eksik veya hatalı.")
-        if not is_sb_valid:
-            errors.append("Liman Cüzdan Numarası 'S' ile başlamalı ve geçerli formatta olmalıdır (Örn: S00434304).")
-        if not pass_val.strip():
-            errors.append("Pasaport Numarası eksik.")
-            
-        if errors:
-            st.error("🚨 SİSTEM KİLİTLİ: Belgeler doğrulanamadı:\n- " + "\n- ".join(errors))
-            validation_locked = True
+        if not final_tckn or not final_sb or len(final_crew_name.split()) < 2:
+            st.warning("⚠️ Eksik veya formatı hatalı veriler var. Ancak yönetici inisiyatifi ile Word/Excel çıktılarını alabilirsiniz.")
+            has_warning = True
         else:
-            st.success(f"✅ Veriler doğrulandı. Asgari Kontrat Şartı: {required_contract_months} Ay ({'Zabit' if is_officer else 'Alt Kadro'}).")
-            uab_url = f"https://gemiadami.uab.gov.tr/verification/{tckn_val.strip()}/{sb_val.strip()}"
+            st.success(f"✅ Veriler Onaylandı. Asgari Kontrat Şartı: {required_contract_months} Ay ({'Zabit' if is_officer else 'Alt Kadro'}).")
+            uab_url = f"https://gemiadami.uab.gov.tr/verification/{final_tckn.strip()}/{final_sb.strip()}"
             st.markdown(f'<a href="{uab_url}" target="_blank" style="background-color: #0056b3; color: white; padding: 10px 20px; border-radius: 4px; text-decoration: none; font-weight: bold; display: inline-block; margin-bottom: 10px;">UAB Doğrulama Portalı ↗</a>', unsafe_allow_html=True)
     else:
-        if not pass_val.strip() or not sb_val.strip() or not crew_name.strip():
-            st.error(f"🚨 SİSTEM KİLİTLİ: {nationality} personel için Ad Soyad, Pasaport No veya Seaman's Book No eksik.")
-            validation_locked = True
+        if not final_pass or not final_sb or len(final_crew_name.split()) < 2:
+            st.warning(f"⚠️ {nationality} personel için eksik bilgiler var. Manuel tamamlayıp çıktı alabilirsiniz.")
+            has_warning = True
         else:
             st.success(f"✅ {nationality} personel evrakları başarıyla doğrulandı.")
 
@@ -431,7 +295,7 @@ if uploaded_files:
         
         ws1['C6'] = vessel_name
         ws1['C8'] = join_date.strftime("%d.%m.%Y")
-        ws1['N6'] = crew_name
+        ws1['N6'] = final_crew_name
         ws1['N8'] = rank
         
         for coord in ['C6', 'C8', 'N6', 'N8']:
@@ -451,26 +315,65 @@ if uploaded_files:
 
         for r_idx, no_str, en_title, req_ranks, keywords in CERT_MATRIX:
             is_req = rank in req_ranks
-            is_found = any(kw in evidence_text for kw in keywords) if not validation_locked else False
+            
+            # Bu sertifikaya ait yüklenmiş dosya var mı?
+            matching_fname = None
+            is_found = False
+            for kw in keywords:
+                for fn in extracted_dates.keys():
+                    if kw in fn:
+                        matching_fname = fn
+                        is_found = True
+                        break
+                if is_found:
+                    break
+            
+            if not is_found:
+                is_found = any(kw in evidence_text for kw in keywords)
+
             r_desc = r_idx + 1
             
             if is_req:
                 if is_found:
-                    doc_no_val = sb_val if "seaman" in en_title.lower() else (pass_val if "pass" in en_title.lower() else "Verified")
-                    validity_years = 2 if "medical" in en_title.lower() else 5
-                    simulated_expiry = join_date + relativedelta(years=validity_years)
-                    remaining_months = (simulated_expiry.year - join_date.year) * 12 + (simulated_expiry.month - join_date.month)
+                    doc_no_val = final_sb if "seaman" in en_title.lower() else (final_pass if "pass" in en_title.lower() else "Verified")
                     
+                    # GERÇEK TARİH HESAPLAMA MANTIĞI
+                    issue_str = ""
+                    expiry_str = ""
+                    remaining_months = 60 # Varsayılan
+                    
+                    if matching_fname and extracted_dates[matching_fname].get("expiry"):
+                        expiry_str = extracted_dates[matching_fname]["expiry"]
+                        issue_str = extracted_dates[matching_fname]["issue"]
+                        try:
+                            # Gerçek tarihi datetime'a çevir ve kalan ayı hesapla
+                            exp_date = datetime.datetime.strptime(expiry_str, "%d.%m.%Y").date()
+                            remaining_months = (exp_date.year - join_date.year) * 12 + (exp_date.month - join_date.month)
+                        except:
+                            # Parse hatası olursa varsayılan tahmini süre atla
+                            validity_years = 2 if "medical" in en_title.lower() else 5
+                            simulated_expiry = join_date + relativedelta(years=validity_years)
+                            expiry_str = simulated_expiry.strftime('%d.%m.%Y') + " (Tahmini)"
+                            remaining_months = (simulated_expiry.year - join_date.year) * 12 + (simulated_expiry.month - join_date.month)
+                    else:
+                        validity_years = 2 if "medical" in en_title.lower() else 5
+                        simulated_expiry = join_date + relativedelta(years=validity_years)
+                        expiry_str = simulated_expiry.strftime('%d.%m.%Y') + " (Tahmini)"
+                        remaining_months = (simulated_expiry.year - join_date.year) * 12 + (simulated_expiry.month - join_date.month)
+                    
+                    if not issue_str:
+                        issue_str = join_date.strftime('%d.%m.%Y')
+
                     if remaining_months < required_contract_months:
                         status_str = f"► YETERSİZ SÜRE! ({remaining_months} Ay Kaldı - Kontratı Tamamlayamaz)"
                         chosen_fill = red_fill
                         inter_fill = intersect_red
                     elif remaining_months < 12:
-                        status_str = f"Doc No: {doc_no_val} | Exp: {simulated_expiry.strftime('%d.%m.%Y')} | DİKKAT: <1 YIL ({remaining_months} Ay)"
+                        status_str = f"Doc No: {doc_no_val} | Exp: {expiry_str} | DİKKAT: <1 YIL ({remaining_months} Ay)"
                         chosen_fill = yellow_fill
                         inter_fill = intersect_yellow
                     else:
-                        status_str = f"Doc No: {doc_no_val} | Exp: {simulated_expiry.strftime('%d.%m.%Y')} | Geçerli ({remaining_months} Ay)"
+                        status_str = f"Doc No: {doc_no_val} | Exp: {expiry_str} | Geçerli ({remaining_months} Ay)"
                         chosen_fill = green_fill
                         inter_fill = intersect_green
 
@@ -520,7 +423,7 @@ if uploaded_files:
         
         table.rows[0].cells[3].text = vessel_name
         table.rows[0].cells[7].text = join_date.strftime("%d.%m.%Y")
-        table.rows[1].cells[3].text = crew_name
+        table.rows[1].cells[3].text = final_crew_name
         table.rows[1].cells[7].text = vessel_flag if vessel_flag else ""
         table.rows[2].cells[3].text = rank
         table.rows[2].cells[7].text = ecdis_type if ecdis_type else "N/A"
@@ -534,7 +437,7 @@ if uploaded_files:
             else:
                 cell.text = "Yes ☐ No☑ N/A☐"
 
-        has_cra = any(kw in evidence_text for kw in ["cra", "endorsement"]) if not validation_locked else False
+        has_cra = any(kw in evidence_text for kw in ["cra", "endorsement"])
         ecdis_req = rank in ["Master", "Chief officer", "2 nd Officer", "3 rd Officer"]
         
         set_status(5, is_yes=True)
@@ -545,7 +448,7 @@ if uploaded_files:
             if i != 14:
                 set_status(i, is_yes=True)
         
-        id_display = tckn_val if nationality == "Turkish" else pass_val
+        id_display = final_tckn if nationality == "Turkish" else final_pass
         table.rows[14].cells[1].text = f"Id card (ID / Passport: {id_display})"
         set_status(14, is_yes=True)
         
@@ -561,6 +464,7 @@ if uploaded_files:
 
     c1, c2 = st.columns(2)
     with c1:
-        st.download_button("📊 35-101 Excel İndir", build_excel_from_template(), f"35-101_{crew_name}.xlsx", disabled=validation_locked)
+        # disabled=False ile buton kilidini tamamen kaldırdık!
+        st.download_button("📊 35-101 Excel İndir", build_excel_from_template(), f"35-101_{final_crew_name}.xlsx", disabled=False)
     with c2:
-        st.download_button("📝 35-102 Word İndir", build_word_from_template(), f"35-102_{crew_name}.docx", disabled=validation_locked)
+        st.download_button("📝 35-102 Word İndir", build_word_from_template(), f"35-102_{final_crew_name}.docx", disabled=False)
