@@ -52,7 +52,7 @@ if st.sidebar.button("🚪 Çıkış Yap"):
     st.rerun()
 
 st.title("⚓ Evrak Kontrol & Denetim Portalı")
-st.caption("Üç Katmanlı Eşleştirme Motoru & Kilit Olmayan Sistem")
+st.caption("Otomatik Model Tanıma & Üç Katmanlı Eşleştirme Motoru")
 
 # =============================================================================
 # AI (GEMINI) BAĞLANTISI
@@ -161,12 +161,24 @@ if uploaded_files and api_key:
 
     genai.configure(api_key=api_key)
     
-    # === HATA ÇÖZÜMÜ BURADA: Model ismini -latest olarak değiştirdik ===
+    # =========================================================================
+    # OTOMATİK MODEL BULUCU (404 HATASINI KÖKÜNDEN ÇÖZER)
+    # =========================================================================
+    chosen_model = "gemini-1.5-flash" # Varsayılan
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        if "models/gemini-1.5-flash" in available_models:
+            chosen_model = "models/gemini-1.5-flash"
+        elif "models/gemini-1.5-pro" in available_models:
+            chosen_model = "models/gemini-1.5-pro"
+        elif available_models:
+            chosen_model = available_models[0]
     except Exception as e:
-        model = genai.GenerativeModel('gemini-1.5-pro-latest')
-    # ====================================================================
+        st.error(f"⚠️ API Anahtarı Doğrulanamadı: Lütfen anahtarınızı doğru kopyaladığınızdan emin olun. Hata: {str(e)}")
+        st.stop()
+        
+    model = genai.GenerativeModel(chosen_model)
+    # =========================================================================
     
     crew_name, crew_surname, tckn_val, sb_val, pass_val = "", "", "", "", ""
     all_certs = []
@@ -192,7 +204,7 @@ if uploaded_files and api_key:
     Bulamadığın alanları boş bırak ("").
     """
     
-    progress_text = "Yapay Zeka Evrakları Esnek Modda Okuyor..."
+    progress_text = f"Yapay Zeka Evrakları Okuyor (Kullanılan Model: {chosen_model})..."
     my_bar = st.progress(0, text=progress_text)
     
     for idx, f in enumerate(uploaded_files):
@@ -222,19 +234,17 @@ if uploaded_files and api_key:
                 all_certs.append(c)
                 
         except Exception as e:
-            st.error(f"🚨 API BAĞLANTI HATASI ({f.name}): Lütfen tekrar deneyin. Detay: {str(e)}")
+            st.error(f"🚨 OKUMA HATASI ({f.name}): Bu evrak desteklenmiyor olabilir veya kotalar doldu. Hata: {str(e)}")
             
         time.sleep(3.5)
         my_bar.progress((idx + 1) / len(uploaded_files), text=f"{f.name} okundu.")
         
     my_bar.empty()
 
-    # === TARİHLERİ EKRANDA GÖSTERME TABLOSU EKLENDİ ===
     if all_certs:
         st.subheader("🗓️ Okunan Evraklar ve Tarihler")
         st.caption("Yapay zekanın evrakların içinden çektiği veriler aşağıdadır. Hatalı okunan bir tarih varsa, Word/Excel'e geçmeden görebilirsiniz.")
         
-        # Tablo formatında göstermek için
         display_data = []
         for c in all_certs:
             display_data.append({
@@ -244,7 +254,6 @@ if uploaded_files and api_key:
                 "Bitiş": c.get("bitis", "")
             })
         st.dataframe(display_data, use_container_width=True)
-    # =================================================
 
     st.subheader("📋 Çıkarılan / Teyit Edilen Bilgiler")
     
