@@ -1,8 +1,6 @@
 streamlit
 openpyxl
 python-docx
-pypdf
-pdf2image
-Pillow
 python-dateutil
-google-generativeai
+requests
+beautifulsoup4
