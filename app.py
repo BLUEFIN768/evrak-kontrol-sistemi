@@ -52,7 +52,7 @@ if st.sidebar.button("🚪 Çıkış Yap"):
     st.rerun()
 
 st.title("⚓ Evrak Kontrol & Denetim Portalı")
-st.caption("Otomatik Model Tanıma & Üç Katmanlı Eşleştirme Motoru")
+st.caption("Yapay Zeka Destekli (Gemini 3.8) & Üç Katmanlı Eşleştirme Motoru")
 
 # =============================================================================
 # AI (GEMINI) BAĞLANTISI
@@ -161,24 +161,12 @@ if uploaded_files and api_key:
 
     genai.configure(api_key=api_key)
     
-    # =========================================================================
-    # OTOMATİK MODEL BULUCU (404 HATASINI KÖKÜNDEN ÇÖZER)
-    # =========================================================================
-    chosen_model = "gemini-1.5-flash" # Varsayılan
+    # HATA MESAJINDA İSTENEN SPESİFİK MODEL
     try:
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        if "models/gemini-1.5-flash" in available_models:
-            chosen_model = "models/gemini-1.5-flash"
-        elif "models/gemini-1.5-pro" in available_models:
-            chosen_model = "models/gemini-1.5-pro"
-        elif available_models:
-            chosen_model = available_models[0]
+        model = genai.GenerativeModel('gemini-3.8-flash')
     except Exception as e:
-        st.error(f"⚠️ API Anahtarı Doğrulanamadı: Lütfen anahtarınızı doğru kopyaladığınızdan emin olun. Hata: {str(e)}")
+        st.error(f"⚠️ Model başlatılamadı: {str(e)}")
         st.stop()
-        
-    model = genai.GenerativeModel(chosen_model)
-    # =========================================================================
     
     crew_name, crew_surname, tckn_val, sb_val, pass_val = "", "", "", "", ""
     all_certs = []
@@ -204,7 +192,7 @@ if uploaded_files and api_key:
     Bulamadığın alanları boş bırak ("").
     """
     
-    progress_text = f"Yapay Zeka Evrakları Okuyor (Kullanılan Model: {chosen_model})..."
+    progress_text = "Yapay Zeka Evrakları Okuyor (Model: gemini-3.8-flash)..."
     my_bar = st.progress(0, text=progress_text)
     
     for idx, f in enumerate(uploaded_files):
@@ -234,7 +222,7 @@ if uploaded_files and api_key:
                 all_certs.append(c)
                 
         except Exception as e:
-            st.error(f"🚨 OKUMA HATASI ({f.name}): Bu evrak desteklenmiyor olabilir veya kotalar doldu. Hata: {str(e)}")
+            st.error(f"🚨 OKUMA HATASI ({f.name}): Hata: {str(e)}")
             
         time.sleep(3.5)
         my_bar.progress((idx + 1) / len(uploaded_files), text=f"{f.name} okundu.")
