@@ -160,8 +160,13 @@ if uploaded_files and api_key:
         st.stop()
 
     genai.configure(api_key=api_key)
-    # MIME type dayatmasını kaldırdık, yapay zekayı özgür bıraktık.
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    # === HATA ÇÖZÜMÜ BURADA: Model ismini -latest olarak değiştirdik ===
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    except Exception as e:
+        model = genai.GenerativeModel('gemini-1.5-pro-latest')
+    # ====================================================================
     
     crew_name, crew_surname, tckn_val, sb_val, pass_val = "", "", "", "", ""
     all_certs = []
@@ -213,7 +218,7 @@ if uploaded_files and api_key:
             
             certs = data.get("belgeler", [])
             for c in certs:
-                c["dosya_adi"] = fname # Dosya adını güvenli eşleşme için saklıyoruz
+                c["dosya_adi"] = fname
                 all_certs.append(c)
                 
         except Exception as e:
@@ -224,8 +229,24 @@ if uploaded_files and api_key:
         
     my_bar.empty()
 
+    # === TARİHLERİ EKRANDA GÖSTERME TABLOSU EKLENDİ ===
+    if all_certs:
+        st.subheader("🗓️ Okunan Evraklar ve Tarihler")
+        st.caption("Yapay zekanın evrakların içinden çektiği veriler aşağıdadır. Hatalı okunan bir tarih varsa, Word/Excel'e geçmeden görebilirsiniz.")
+        
+        # Tablo formatında göstermek için
+        display_data = []
+        for c in all_certs:
+            display_data.append({
+                "Dosya Adı": c.get("dosya_adi", ""),
+                "Belge / Eğitim": c.get("isim", ""),
+                "Veriliş": c.get("verilis", ""),
+                "Bitiş": c.get("bitis", "")
+            })
+        st.dataframe(display_data, use_container_width=True)
+    # =================================================
+
     st.subheader("📋 Çıkarılan / Teyit Edilen Bilgiler")
-    st.caption("Veriler AI tarafından dosya içeriklerinden çekilmiştir. Gerekirse kutulardan düzeltme yapabilirsiniz.")
     
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -294,7 +315,6 @@ if uploaded_files and api_key:
                 matching_cert = None
                 is_found = False
 
-                # 1. KATMAN: Yapay Zekanın İçerikten Okuduğu İsimlerde Ara
                 for cert in all_certs:
                     c_name = str(cert.get("isim", "")).lower()
                     if any(kw in c_name for kw in keywords):
@@ -302,7 +322,6 @@ if uploaded_files and api_key:
                         is_found = True
                         break
                 
-                # 2. KATMAN: Yapay Zeka ismini yanlış okumuşsa, bari dosya adından yakala
                 if not is_found:
                     for cert in all_certs:
                         f_name = str(cert.get("dosya_adi", "")).lower()
@@ -311,7 +330,6 @@ if uploaded_files and api_key:
                             is_found = True
                             break
 
-                # 3. KATMAN: Yapay zeka tamamen kör olmuşsa, sadece kullanıcının yüklediği dosya adından Var/Yok onayı al
                 if not is_found:
                     for f in uploaded_files:
                         f_name = f.name.lower()
