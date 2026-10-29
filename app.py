@@ -53,10 +53,10 @@ if st.sidebar.button("🚪 Çıkış Yap"):
     st.rerun()
 
 st.title("⚓ Evrak Kontrol & Denetim Portalı")
-st.caption("Hedefli (Zonal) Belge Ayrıştırma & Kontrat Emniyeti Denetim Motoru")
+st.caption("Hedefli Belge Ayrıştırma, Kontrat Emniyeti & 35-101 / 35-102 Çıktı Motoru")
 
 # =============================================================================
-# 35-101 KURUMSAL MATRİS TANIMLARI
+# KURUMSAL 35-101 MATRİS TANIMLARI
 # =============================================================================
 RANKS_MAP = {
     "Master": 6, "Chief officer": 7, "2 nd Officer": 8, "3 rd Officer": 9,
@@ -119,10 +119,9 @@ st.sidebar.markdown(f"⏱ **Asgari Kontrat Emniyeti:** `{required_contract_month
 st.sidebar.markdown("⚠️ **Sarı İkaz Sınırı:** `< 12 Ay`")
 
 # =============================================================================
-# AKILLI ŞABLON BULUCU (DİNAMİK DOSYA YOLU YÖNETİMİ)
+# AKILLI ŞABLON BULUCU (REPODAKİ TÜM DİZİNLERİ TARAR)
 # =============================================================================
 def locate_template(pattern_str, extension):
-    """Repodaki dosyaları tarayarak 35-101 ve 35-102 şablonlarını otomatik bulur."""
     target_clean = pattern_str.lower().replace("-", "").replace("_", "").replace(" ", "")
     for root, dirs, files in os.walk("."):
         for f in files:
@@ -135,21 +134,8 @@ def locate_template(pattern_str, extension):
 template_excel_path = locate_template("35101", ".xlsx")
 template_word_path = locate_template("35102", ".docx")
 
-# Şablon Durumu Bildirimi
-st.sidebar.markdown("---")
-st.sidebar.subheader("📄 Kurumsal Şablon Durumu")
-if template_excel_path:
-    st.sidebar.success(f"Excel: `{os.path.basename(template_excel_path)}` bulundu.")
-else:
-    st.sidebar.error("❌ 35-101 Excel şablonu bulunamadı!")
-
-if template_word_path:
-    st.sidebar.success(f"Word: `{os.path.basename(template_word_path)}` bulundu.")
-else:
-    st.sidebar.error("❌ 35-102 Word şablonu bulunamadı!")
-
 # =============================================================================
-# HEDEFLİ VERİ AYIKLAMA FONKSİYONLARI
+# HEDEFLİ VERİ AYIKLAMA MOTORU
 # =============================================================================
 def is_passport_file(fname):
     f = fname.lower()
@@ -194,7 +180,7 @@ def extract_data(files):
     tckn, sb, pass_no, text_blob = "", "", "", ""
     best_name = ""
     
-    with st.spinner("Evraklar taranıyor ve doğrulanıyor..."):
+    with st.spinner("Evraklar kural matrisine göre taranıyor..."):
         for f in files:
             content = f.read()
             f.seek(0)
@@ -246,77 +232,64 @@ def extract_data(files):
 
             text_blob += f" {fname} {text.lower()} "
             
-            # =================================================================
-            # KURAL 1: PASAPORT DOSYASINDAN BİLGİ ALMA
-            # =================================================================
-            if is_pass:
-                # 1. Pasaport No
-                if not pass_no:
-                    m_p = re.search(r'([UVuv]\d{8})', text)
-                    if m_p:
-                        pass_no = m_p.group(1).upper()
+            # 1. Pasaport No
+            if is_pass and not pass_no:
+                m_p = re.search(r'([UVuv]\d{8})', text)
+                if m_p:
+                    pass_no = m_p.group(1).upper()
+                else:
+                    m_mrz_p = re.search(r'([UVuv][0-9]{8})\d[A-Z]{3}', text.replace(" ", ""))
+                    if m_mrz_p:
+                        pass_no = m_mrz_p.group(1).upper()
+
+            # 2. TCKN (Pasaport veya Cüzdandan)
+            if (is_pass or is_sb) and not tckn and nationality == "Turkish":
+                clean_lines = [l.replace(" ", "") for l in text.splitlines()]
+                for cl in clean_lines:
+                    m_tc_mrz = re.search(r'\d{6}\d[MF<]\d{6}\d([1-9]\d{10})', cl)
+                    if m_tc_mrz:
+                        tckn = m_tc_mrz.group(1)
+                        break
+                if not tckn:
+                    m_tc = re.search(r'(?:K[İI]ML[İI]K|ID)\s*(?:NO)?[^\d]*([1-9]\d{10})', text, re.IGNORECASE)
+                    if m_tc:
+                        tckn = m_tc.group(1)
                     else:
-                        m_mrz_p = re.search(r'([UVuv][0-9]{8})\d[A-Z]{3}', text.replace(" ", ""))
-                        if m_mrz_p:
-                            pass_no = m_mrz_p.group(1).upper()
+                        m_tc2 = re.search(r'(?<!\d)([1-9]\d{10})(?!\d)', text)
+                        if m_tc2:
+                            tckn = m_tc2.group(1)
 
-                # 2. TCKN
-                if not tckn and nationality == "Turkish":
-                    clean_lines = [l.replace(" ", "") for l in text.splitlines()]
-                    for cl in clean_lines:
-                        m_tc_mrz = re.search(r'\d{6}\d[MF<]\d{6}\d([1-9]\d{10})', cl)
-                        if m_tc_mrz:
-                            tckn = m_tc_mrz.group(1)
-                            break
-                    if not tckn:
-                        m_tc = re.search(r'(?:K[İI]ML[İI]K|ID)\s*(?:NO)?[^\d]*([1-9]\d{10})', text, re.IGNORECASE)
-                        if m_tc:
-                            tckn = m_tc.group(1)
-                        else:
-                            m_tc2 = re.search(r'(?<!\d)([1-9]\d{10})(?!\d)', text)
-                            if m_tc2:
-                                tckn = m_tc2.group(1)
-
-                # 3. Ad Soyad (MRZ Öncelikli, Ardından Etiketler)
-                if not best_name or len(best_name.split()) < 2:
-                    for line in text.upper().splitlines():
-                        l_clean = line.replace(" ", "")
-                        if "P<TUR" in l_clean and "<<" in l_clean:
-                            body = l_clean.split("P<TUR")[-1]
-                            parts = body.split("<<")
-                            if len(parts) >= 2:
-                                surname = parts[0].replace("<", "").strip()
-                                given = " ".join([p for p in parts[1].split("<") if p]).strip()
-                                if len(surname) > 1 and len(given) > 1:
-                                    best_name = f"{given} {surname}"
-                                    break
-                    if not best_name or len(best_name.split()) < 2:
-                        m_sur = re.search(r'SOYADI\s*/\s*SURNAME[^\w]*([A-ZÇĞİÖŞÜ]+)', text, re.IGNORECASE)
-                        m_nam = re.search(r'ADI\s*/\s*NAME[^\w]*([A-ZÇĞİÖŞÜ\s]+?)(?=\n|PASAPORT|CINSIYET|SEX|UYRUK|$)', text, re.IGNORECASE)
-                        if m_sur and m_nam:
-                            sur_val = m_sur.group(1).strip()
-                            nam_val = m_nam.group(1).strip().replace("\n", " ")
-                            if sur_val.upper() != nam_val.upper() and len(nam_val) > 2:
-                                best_name = f"{nam_val} {sur_val}"
-
-            # =================================================================
-            # KURAL 2: LİMAN CÜZDANI DOSYASINDAN S İLE BAŞLAYAN NO
-            # =================================================================
-            if is_sb:
+            # 3. Liman Cüzdan Numarası
+            if is_sb and not sb:
+                clean_lines = [l.replace(" ", "") for l in text.splitlines()]
+                for cl in clean_lines:
+                    m_mrz_sb = re.match(r'^([S58]\d{8})', cl, re.IGNORECASE)
+                    if m_mrz_sb:
+                        sb = "S" + m_mrz_sb.group(1)[1:9]
+                        break
                 if not sb:
-                    clean_lines = [l.replace(" ", "") for l in text.splitlines()]
-                    for cl in clean_lines:
-                        m_mrz_sb = re.match(r'^([S58]\d{8})', cl, re.IGNORECASE)
-                        if m_mrz_sb:
-                            sb = "S" + m_mrz_sb.group(1)[1:9]
-                            break
-                    if not sb:
-                        sb = format_seaman_number(text)
+                    sb = format_seaman_number(text)
 
-                if not tckn and nationality == "Turkish":
-                    m_tc_sb = re.search(r'(?<!\d)([1-9]\d{10})(?!\d)', text)
-                    if m_tc_sb:
-                        tckn = m_tc_sb.group(1)
+    # 4. Ad Soyad: Hem Pasaport hem Cüzdan MRZ / Metinlerinden Ara
+    clean_all = text_blob.upper().replace(" ", "").replace("\n", "").replace("\r", "")
+    m_mrz_name = re.search(r'[PG]<TUR([A-Z]+<<[A-Z<]+)', clean_all)
+    if m_mrz_name:
+        mrz_body = m_mrz_name.group(1)
+        parts = mrz_body.split("<<")
+        if len(parts) >= 2:
+            surname = parts[0].replace("<", "").strip()
+            given = " ".join([p for p in parts[1].split("<") if p]).strip()
+            if len(surname) >= 2 and len(given) >= 2:
+                best_name = f"{given} {surname}"
+
+    if not best_name or len(best_name.split()) < 2:
+        m_sur = re.search(r'SOYADI\s*/\s*SURNAME[^\w]*([A-ZÇĞİÖŞÜ]+)', text_blob.upper())
+        m_nam = re.search(r'ADI\s*/\s*NAME[^\w]*([A-ZÇĞİÖŞÜ\s]+?)(?=\s*UYRUK|\s*PASAPORT|\s*DOĞUM|\s*CINSIYET|\\n)', text_blob.upper())
+        if m_sur and m_nam:
+            sur_val = m_sur.group(1).strip()
+            nam_val = m_nam.group(1).strip()
+            if sur_val != nam_val:
+                best_name = f"{nam_val} {sur_val}"
 
     return best_name, tckn, sb, pass_no, text_blob
 
@@ -333,7 +306,7 @@ if uploaded_files:
     crew_name_ext, tckn_ext, sb_ext, pass_ext, evidence_text = extract_data(uploaded_files)
     
     st.subheader("📋 Çıkarılan / Teyit Edilen Bilgiler")
-    st.caption("Veriler doğrudan Pasaport ve Liman Cüzdanı belgelerinden çekilmiştir. Gerekirse elle düzeltebilirsiniz.")
+    st.caption("Veriler belgelerden çekilmiştir. Gerekirse elle müdahale edebilirsiniz.")
     
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -354,7 +327,7 @@ if uploaded_files:
         
         errors = []
         if not crew_name.strip() or len(crew_name.strip().split()) < 2:
-            errors.append("Personel Adı Soyadı pasaporttan tam okunamadı.")
+            errors.append("Personel Adı Soyadı belgelerden okunamadı.")
         if not is_tckn_valid:
             errors.append("11 haneli geçerli T.C. Kimlik Numarası eksik veya hatalı.")
         if not is_sb_valid:
@@ -379,7 +352,7 @@ if uploaded_files:
     st.divider()
 
     # =========================================================================
-    # 1. 35-101 EXCEL ŞABLONUNU DOLDURMA (OTOMATİK ŞABLON BAĞLANTISI)
+    # 1. 35-101 EXCEL ŞABLONUNU DOLDURMA
     # =========================================================================
     def build_excel_from_template():
         if not template_excel_path or not os.path.exists(template_excel_path):
@@ -470,7 +443,7 @@ if uploaded_files:
         return buf.getvalue()
 
     # =========================================================================
-    # 2. 35-102 WORD ŞABLONUNU DOLDURMA (OTOMATİK ŞABLON BAĞLANTISI)
+    # 2. 35-102 WORD ŞABLONUNU DOLDURMA
     # =========================================================================
     def build_word_from_template():
         if not template_word_path or not os.path.exists(template_word_path):
@@ -526,6 +499,6 @@ if uploaded_files:
 
     c1, c2 = st.columns(2)
     with c1:
-        st.download_button("📊 Orijinal 35-101 Excel İndir", build_excel_from_template(), f"35-101_{crew_name}.xlsx", disabled=validation_locked)
+        st.download_button("📊 35-101 Excel İndir", build_excel_from_template(), f"35-101_{crew_name}.xlsx", disabled=validation_locked)
     with c2:
-        st.download_button("📝 Orijinal 35-102 Word İndir", build_word_from_template(), f"35-102_{crew_name}.docx", disabled=validation_locked)
+        st.download_button("📝 35-102 Word İndir", build_word_from_template(), f"35-102_{crew_name}.docx", disabled=validation_locked)
