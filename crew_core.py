@@ -1,10 +1,12 @@
-
 import pandas as pd
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+import re
 
-# --- VERİ MODELLERİ ---
+# ==========================================
+# BÖLÜM 1: VERİ MODELLERİ VE ŞABLON YAPISI
+# ==========================================
 
 @dataclass
 class Evidence:
@@ -13,7 +15,7 @@ class Evidence:
     document_no: Optional[str] = None
     issue_date: Optional[datetime] = None
     expiry_date: Optional[datetime] = None
-    verified: bool = False # Madde 3.5: AI çıktısı verified=False başlar
+    verified: bool = False # Madde 3.5: AI çıktısı verified=False başlar[cite: 1]
     raw_text: Optional[str] = None
 
 @dataclass
@@ -25,52 +27,63 @@ class Result:
     evidence_used: Optional[Evidence] = None
 
 # --- ŞABLON SATIR İMZALARI (ITEM_SIGNATURES) ---
-# Madde 3.6: Şablon satır yapısı doğrulanır. 35-101 Excel satırlarına karşılık gelen kodlar.
+# Madde 3.6: Şablon satır yapısı doğrulanır. 35-101 Excel satırlarına karşılık gelen kodlar[cite: 1].
 ITEM_SIGNATURES = {
-    # Örnek satır indeksleri (Gerçek Excel şablonuna göre güncellenmelidir)
     10: "PASSPORT",
     11: "SEAMAN_BOOK",
     12: "MEDICAL_CERT",
     13: "YELLOW_FEVER",
-    # Eğitimler
     15: "BASIC_SAFETY",
-    # ... Diğer belgeler buraya eklenecek
+    # Diğer belgeler Excel'deki satır numaralarına göre buraya eklenecek
 }
 
 def load_rules_from_excel(filepath: str, rank: str, vessel_type: str = "DEFAULT") -> Dict[str, str]:
     """
-    Madde 3.1: Kural kaynağı 35-101 Excel'idir. Rütbeye göre 'X' (Zorunlu) veya 'D' (Atamaya bağlı) okur.
+    Madde 3.1: Kural kaynağı 35-101 Excel'idir. Rütbeye göre 'X' (Zorunlu) veya 'D' (Atamaya bağlı) okur[cite: 1].
     """
-    df = pd.read_excel(filepath, sheet_name="DOC_MATRIX") # Sayfa adı şablona göre uyarlanmalı
-    # Excel'den okuma mantığı buraya inşa edilecek
+    df = pd.read_excel(filepath, sheet_name="DOC_MATRIX")
     rules = {}
+    # Excel okuma mantığı projenin ilerleyen aşamalarında buraya entegre edilecek
     return rules
 
 def _check_dates(evidence: Evidence, rule_type: str) -> str:
     """
-    Madde 5: Yeni tarih kuralı yalnız bu fonksiyon içinde yazılır.
+    Madde 5: Yeni tarih kuralı yalnız bu fonksiyon içinde yazılır[cite: 1].
     """
     if not evidence.issue_date:
-        return "REVIEW" # Tarih okunamadıysa REVIEW (Madde 3.4)
+        return "REVIEW" # Tarih okunamadıysa REVIEW (Madde 3.4)[cite: 1]
     
-    # Süresiz veya özel kurallar (örn: Sarı Humma - Madde 4)
     if evidence.code == "YELLOW_FEVER" and not evidence.expiry_date:
-        return "OK" # Ömür boyu geçerli varsayımı
+        return "OK" # Sarı humma: bitiş yoksa ömür boyu (Madde 4)[cite: 1]
         
     if evidence.expiry_date and evidence.expiry_date < datetime.now():
         return "EXPIRED"
         
     return "OK"
 
-def evaluate(evidences: List[Evidence], rank: str, excel_path: str) -> List[Result]:
+# ==========================================
+# BÖLÜM 2: KİMLİK DOĞRULAMA VE DEĞERLENDİRME
+# ==========================================
+
+def verify_identity(uab_tckn: str, uab_cuzdan_no: str, personel_tckn: str, personel_cuzdan_no: str) -> bool:
     """
-    Ana değerlendirme fonksiyonu.
-    Veri akışı: UAB PDF / AI / elle tablo → list[Evidence] → evaluate() → list[Result]
+    Madde 3.8: UAB çıktısında ad/soyad maskelidir (E**R). 
+    İsim eşleştirmesine asla güvenme; TCKN ve cüzdan no kullan[cite: 1].
     """
-    rules = load_rules_from_excel(excel_path, rank)
-    results = []
+    if not uab_tckn or not personel_tckn:
+        return False
     
-    # Her bir kural (X veya D) için evidence listesini kontrol et
-    # Eşleşme, tarih ve doğrulama kontrolleri (maskeli isim/TCKN) burada yapılacak.
+    tckn_match = str(uab_tckn).strip() == str(personel_tckn).strip()
+    cuzdan_match = str(uab_cuzdan_no).strip().upper() == str(personel_cuzdan_no).strip().upper()
     
-    return results
+    return tckn_match and cuzdan_match
+
+def parse_uab_pdf(pdf_text: str) -> List[Evidence]:
+    """
+    UAB "Gemi Adamları" doğrulama çıktısını (metin katmanlı PDF) okur[cite: 1].
+    """
+    evidences = []
+    # RegEx ve ayrıştırma mantığı buraya eklenecek
+    return evidences
+
+def
