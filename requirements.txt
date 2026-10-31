@@ -1,7 +1,0 @@
-streamlit
-openpyxl
-python-docx
-python-dateutil
-pdfplumber
-pytesseract
-Pillow
